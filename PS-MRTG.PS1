@@ -1,0 +1,2366 @@
+# ============================================================
+# SCRIPT  : PS-MRTG — Network Bandwidth Monitor
+# VERSION : 1.16
+# AUTEUR  : Eric Guiffault
+# DATE    : 2026-05
+#
+# DESCRIPTION :
+#   Monitoring de bande passante réseau en temps réel.
+#   Style MRTG classique — 4 vues temporelles agrégées.
+#   Interface HTML interactive — 100% offline.
+#   Compatible ConstrainedLanguage strict (PS 5.1 + PS 7+).
+#
+# CHANGELOG v1.16 :
+#   - Axe X divisé en 6 segments ÉGAUX (7 graduations) sur tous les
+#     graphes. Pas = fenêtre / 6 : 10 min (Live 1h), 1 h (6h),
+#     10 h (2.5j), 60 h (15j). Graduations régulières et alignées.
+#
+# CHANGELOG v1.15 :
+#   - Axe X temporel à domaine FIXE : les données s'affichent à leur
+#     position réelle. Un historique partiel n'occupe que sa fraction
+#     de largeur (ex. 1 jour de données sur la vue 15j = 1/15 du graphe)
+#     au lieu d'être étiré sur toute la largeur.
+#   - Tooltip : date + heure complètes (JJ/MM HH:MM:SS).
+#
+# CHANGELOG v1.14 :
+#   - Chaque graphique indique sa PÉRIODE (recul) à côté de son type :
+#     Live (5s) · 1h / 6h (30s) / 2.5j (5min) / 15j (30min).
+#   - Correction : la vue « Récent » couvre 6h (et non 1h comme affiché).
+#   - Infobulle au survol : explication complète du recul de chaque vue.
+#
+# CHANGELOG v1.13 :
+#   - Axe X (vues multi-jours) : date + heure sur UNE SEULE ligne
+#     au format « JJ/MM HH:MM ». Graduations espacées → pas de
+#     chevauchement.
+#
+# CHANGELOG v1.12 :
+#   - Axe X : les vues multi-jours (2.5j / 15j) affichent la DATE (JJ/MM)
+#     sur une 2e ligne sous l'heure → date + heure visibles sans
+#     chevauchement. Graduations espacées pour une lisibilité maximale.
+#
+# CHANGELOG v1.11 :
+#   - Axe X (heures) agrandi à la même taille que l'axe Y (débits)
+#     → libellés temporels nettement plus lisibles.
+#
+# CHANGELOG v1.10 :
+#   - Échelle Y : paliers automatiques plus fins (progression 1-2-5),
+#     notamment 200 et 500 Mbps, pour éviter les sauts 100M → 1G.
+#   - Mêmes paliers proposés en échelle fixe (menu déroulant).
+#   - L'échelle s'ajuste toujours en fonction du seuil d'alarme (auto).
+#   - Seuil d'alarme DÉSACTIVÉ par défaut (activable à la demande).
+#
+# CHANGELOG v1.9 :
+#   - Vue « Tous » : les 4 graphiques partagent désormais la MÊME
+#     échelle Y (même hauteur en Mbps) → comparaison fiable.
+#   - Le seuil d'alarme POUSSE l'échelle (mode auto) : la ligne rouge
+#     est toujours visible et apparaît simultanément sur les 4 graphes.
+#   - Axe Y plus lisible : police agrandie + unité (Kbps/Mbps/Gbps)
+#     affichée sur une 2e ligne sous la valeur.
+#   - La vue plein écran conserve son échelle propre (lecture fine),
+#     mais inclut elle aussi le seuil pour qu'il reste visible.
+#
+# ARCHITECTURE :
+#   PS collecte les compteurs réseau toutes les 5s
+#   PS écrit network_data.js toutes les 2s
+#   Le navigateur recharge network_data.js toutes les 2s
+#   Chart.js affiche les graphiques IN/OUT
+#
+# VUES TEMPORELLES (recul = fenêtre couverte, buffer plein = 720 points) :
+#   Live  : 1 pt / 5s    → 720 × 5s    = 3 600 s   = 1 h
+#   Hour  : 1 pt / 30s   → 720 × 30s   = 21 600 s  = 6 h   (moy. 6 pts bruts)
+#   Day   : 1 pt / 5min  → 720 × 5min  = 3 600 min = 60 h = 2,5 j (moy. 60 pts)
+#   Week  : 1 pt / 30min → 720 × 30min = 21 600 min = 360 h = 15 j (moy. 360 pts)
+#
+# INSTALLATION OFFLINE — Chart.js :
+#   Télécharger : chart.js@4.4.0/dist/chart.umd.min.js
+#   Copier dans : %USERPROFILE%\Documents\chartjs.min.js
+#             ou : %TEMP%\PSMrtg\chartjs.min.js
+#
+# NAVIGATEUR : Edge ou Chrome recommandés
+# ============================================================
+
+# ── Détection ISE : relance dans powershell.exe ─────────────
+if ($Host.Name -eq "Windows PowerShell ISE Host") {
+    $scriptPath = $null
+    if ($psISE -and $psISE.CurrentFile) {
+        $scriptPath = $psISE.CurrentFile.FullPath
+    }
+    if ($scriptPath -and (Test-Path -Path $scriptPath -PathType Leaf)) {
+        Write-Host "  ISE detecte — Lancement dans powershell.exe..." -ForegroundColor Cyan
+        Start-Process -FilePath "powershell.exe" `
+                      -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass",
+                                    "-NoExit","-File","`"$scriptPath`"" `
+                      -WindowStyle Normal
+    } else {
+        Write-Host "  Sauvegardez le script (Ctrl+S) puis relancez." -ForegroundColor Red
+    }
+    return
+}
+
+# ============================================================
+# SECTION 1 — CONFIGURATION UTILISATEUR
+# Tous les paramètres modifiables sont ici
+# ============================================================
+
+# Valeur du seuil alarme en Mbps (ligne rouge sur le graphique)
+# Valeur pré-remplie, utilisée quand le seuil est activé.
+$ThresholdAlertMbps = 150
+
+# Seuil activé au démarrage : $true = visible, $false = masqué
+# ✅ v1.10 : désactivé par défaut (l'utilisateur l'active à la demande)
+$ThresholdEnabled   = $false
+
+# Echelle Y :
+#   "auto"  = paliers automatiques (progression fine 1-2-5 :
+#             …100M → 200M → 500M → 1G → 2G → 5G → 10G…)
+#   nombre  = valeur fixe en Mbps (ex: 1000 pour figer à 1 Gbps)
+$YScaleMode = "auto"
+
+# Nombre maximum de points conservés par vue temporelle
+$MaxPoints   = 720
+
+# Intervalle de collecte des compteurs réseau (secondes)
+$IntervalSec = 5
+
+# Fréquence d'écriture du fichier network_data.js (secondes)
+$WriteEvery  = 2
+
+# ============================================================
+# SECTION 2 — CHEMINS DE FICHIERS
+# ============================================================
+
+# Dossier de travail temporaire
+$scriptTemp = "$env:TEMP\PSMrtg"
+if (-not (Test-Path $scriptTemp)) {
+    New-Item -ItemType Directory -Path $scriptTemp -Force | Out-Null
+}
+
+# Fichier HTML du dashboard (ouvert dans le navigateur)
+$htmlFile = "$scriptTemp\dashboard.html"
+
+# Fichier JS de données (rechargé toutes les 2s par le browser)
+$dataFile = "$scriptTemp\network_data.js"
+
+# Fichier de commandes browser → PS (threshold, yScale, etc.)
+$cmdFile  = "$scriptTemp\mrtg_cmd.js"
+
+# ============================================================
+# SECTION 3 — VARIABLES GLOBALES DU SCRIPT
+# ============================================================
+
+$script:startTime        = Get-Date           # Heure de démarrage
+$script:ThresholdAlert   = $ThresholdAlertMbps
+$script:ThresholdEnabled = $ThresholdEnabled
+$script:YScaleMode       = $YScaleMode
+
+# Hashtable des buffers de données par interface
+# Clé = nom interface, Valeur = @{LiveTs; LiveIn; LiveOut; ...}
+$script:interfaces   = @{}
+
+# Hashtable des derniers compteurs bruts par interface
+# Clé = nom interface, Valeur = @{LastIn; LastOut; LastTs}
+$script:rawCounters  = @{}
+
+# Hashtable des métadonnées d'interface (description, vitesse, etc.)
+$script:ActiveIfaces = @{}
+
+# Flag pour éviter les messages d'avertissement répétitifs
+$script:debugDone    = $false
+
+# ============================================================
+# SECTION 4 — FONCTIONS UTILITAIRES
+# Compatible ConstrainedLanguage strict (pas de [math]::)
+# ============================================================
+
+# Retourne le timestamp Unix en millisecondes (entier long)
+function Get-NowMs {
+    $epoch = [datetime]"1970-01-01 00:00:00"
+    $span  = (Get-Date).ToUniversalTime() - $epoch
+    return [long]$span.TotalMilliseconds
+}
+
+# Retourne le nombre de secondes écoulées depuis le démarrage
+function Get-ElapsedSec {
+    return [int]((Get-Date) - $script:startTime).TotalSeconds
+}
+
+# Arrondit un double à $dec décimales
+# ⚠️ CRITIQUE : n'utilise PAS .ToString("Fx") — la locale FR
+#    produit "0,496" au lieu de "0.496" → conversion [double] = 496 !
+#    Solution : calcul arithmétique pur, immune à la locale
+function Round-Double {
+    param([double]$n, [int]$dec)
+    if ($dec -le 0) { return [double]([int]$n) }
+    # Calcul du facteur 10^dec sans [math]::Pow (interdit en CL)
+    $f = [double]1
+    $m = $dec
+    while ($m -gt 0) { $f = $f * 10.0; $m-- }
+    # Arrondi entier puis redivision → résultat propre
+    $rounded = [int]($n * $f + 0.5)
+    return [double]$rounded / $f
+}
+
+# Formate une valeur Mbps en string lisible (Kbps / Mbps / Gbps)
+function Format-Mbps {
+    param([double]$mbps)
+    if ($mbps -ge 1000) { return "$(Round-Double ($mbps/1000) 2) Gbps" }
+    if ($mbps -ge 1)    { return "$(Round-Double $mbps 2) Mbps" }
+    return "$([int]($mbps * 1000)) Kbps"
+}
+
+# Convertit un double en string JSON avec point décimal explicite
+# ⚠️ CRITIQUE : évite que PowerShell produise "0,496" (locale FR)
+#    dans le fichier .js ce qui casserait le JSON côté browser
+function Double-ToJs {
+    param([double]$v)
+    $intPart  = [int]$v
+    $fracPart = $v - [int]$v
+    if ($fracPart -lt 0) { $fracPart = -$fracPart }
+    # 6 décimales suffisent pour des valeurs en Mbps
+    $fracInt = [int]($fracPart * 1000000 + 0.5)
+    $fracStr = "$fracInt"
+    # Zero-padding à 6 digits
+    while ($fracStr.Length -lt 6) { $fracStr = "0$fracStr" }
+    # Suppression des zéros trailing
+    $fracStr = $fracStr.TrimEnd('0')
+    if ($fracStr.Length -eq 0) { return "$intPart" }
+    return "$intPart.$fracStr"
+}
+
+# ============================================================
+# SECTION 5 — DÉTECTION DE LA VITESSE DE LIAISON
+# 3 méthodes en cascade pour maximiser la compatibilité
+# ============================================================
+function Get-LinkSpeed {
+    param([string]$IfaceName)
+
+    # Méthode 1 : WMI Win32_NetworkAdapter (fiable sur PS 5.1)
+    try {
+        $wql = "NetConnectionID='$($IfaceName -replace "'","''")'"
+        $w   = Get-WmiObject -Class Win32_NetworkAdapter -Filter $wql -ErrorAction Stop
+        if ($null -ne $w) {
+            $spd = [long]0
+            try { $spd = [long]$w.Speed } catch {}
+            if ($spd -gt 0) { return $spd }
+        }
+    } catch {}
+
+    # Méthode 2 : Get-NetAdapter (peut échouer en ConstrainedLanguage)
+    try {
+        foreach ($a in (Get-NetAdapter -ErrorAction Stop)) {
+            if ($a.Name -eq $IfaceName) {
+                $spd = [long]0
+                try { $spd = [long]$a.LinkSpeed } catch {}
+                if ($spd -gt 0) { return $spd }
+                # Certains drivers exposent la vitesse en string "1 Gbps"
+                try {
+                    $ls = "$($a.LinkSpeed)"
+                    if ($ls -match '(\d+)') {
+                        $v = [long]$Matches[1]
+                        if ($v -gt 0) { return $v }
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
+
+    return [long]0
+}
+
+# ============================================================
+# SECTION 6 — DÉTECTION DES INTERFACES RÉSEAU ACTIVES
+# ============================================================
+function Get-ActiveInterfaces {
+    $result = @{}
+
+    # Méthode 1 : Get-NetAdapter (interfaces avec Status=Up)
+    try {
+        foreach ($a in (Get-NetAdapter -ErrorAction Stop)) {
+            if ("$($a.Status)" -ne "Up") { continue }
+            $name = "$($a.Name)"
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+
+            $ifIndex   = [int]0
+            try { $ifIndex = [int]$a.InterfaceIndex } catch {}
+
+            $linkSpeed = Get-LinkSpeed -IfaceName $name
+            $descr     = ""; try { $descr = "$($a.InterfaceDescription)" } catch {}
+            $mac       = ""; try { $mac   = "$($a.MacAddress)"           } catch {}
+
+            $result[$name] = @{
+                Name          = $name
+                Description   = $descr
+                LinkSpeedBps  = $linkSpeed
+                LinkSpeedMbps = [double]($linkSpeed / 1000000)
+                MacAddress    = $mac
+                IfIndex       = $ifIndex
+            }
+            Write-Host "  [OK] '$name' | $(Format-Mbps ([double]($linkSpeed/1000000))) | $descr" `
+                       -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  Get-NetAdapter echec : $_" -ForegroundColor Yellow
+    }
+
+    # Méthode 2 fallback : WMI Win32_NetworkAdapter
+    if ($result.Count -eq 0) {
+        Write-Host "  Fallback WMI Win32_NetworkAdapter..." -ForegroundColor Yellow
+        try {
+            foreach ($w in (Get-WmiObject -Class Win32_NetworkAdapter `
+                            -Filter "NetEnabled=True" -ErrorAction Stop)) {
+                $name = "$($w.NetConnectionID)"
+                if ([string]::IsNullOrWhiteSpace($name)) { $name = "$($w.Name)" }
+                if ([string]::IsNullOrWhiteSpace($name)) { continue }
+
+                $speed    = [long]0; try { $speed = [long]$w.Speed    } catch {}
+                $idx      = [int]0;  try { $idx   = [int]$w.InterfaceIndex } catch {}
+                $descr    = "";      try { $descr = "$($w.Description)" } catch {}
+
+                $result[$name] = @{
+                    Name          = $name
+                    Description   = $descr
+                    LinkSpeedBps  = $speed
+                    LinkSpeedMbps = [double]($speed / 1000000)
+                    MacAddress    = "$($w.MACAddress)"
+                    IfIndex       = $idx
+                }
+                Write-Host "  [WMI] '$name' | $descr" -ForegroundColor Cyan
+            }
+        } catch {
+            Write-Host "  WMI Win32_NetworkAdapter echec : $_" -ForegroundColor Red
+        }
+    }
+
+    return $result
+}
+
+# ============================================================
+# SECTION 7 — LECTURE DES COMPTEURS RÉSEAU
+# 3 méthodes en cascade pour maximiser la compatibilité
+# ============================================================
+function Get-NetworkCounters {
+    $result = @{}
+
+    # Méthode 1 : Get-NetAdapterStatistics (la plus fiable, PS 4+)
+    try {
+        $ok = $false
+        foreach ($s in (Get-NetAdapterStatistics -ErrorAction Stop)) {
+            if ($null -eq $s) { continue }
+            $name = "$($s.Name)"
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            $bIn  = [long]0; try { $bIn  = [long]$s.ReceivedBytes } catch {}
+            $bOut = [long]0; try { $bOut = [long]$s.SentBytes      } catch {}
+            $result[$name] = @{ BytesIn=$bIn; BytesOut=$bOut; Method="GNS" }
+            $ok = $true
+        }
+        if ($ok) { return $result }
+    } catch {
+        Write-Host "  Get-NetAdapterStatistics echec : $_" -ForegroundColor Yellow
+    }
+
+    # Méthode 2 : WMI Win32_PerfRawData_Tcpip_NetworkInterface
+    try {
+        $ok = $false
+        foreach ($p in (Get-WmiObject -Class Win32_PerfRawData_Tcpip_NetworkInterface `
+                        -ErrorAction Stop)) {
+            if ($null -eq $p) { continue }
+            $name = "$($p.Name)"
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            $bIn  = [long]0; try { $bIn  = [long]$p.BytesReceivedPersec } catch {}
+            $bOut = [long]0; try { $bOut = [long]$p.BytesSentPersec      } catch {}
+            $result[$name] = @{ BytesIn=$bIn; BytesOut=$bOut; Method="WMI_PERF" }
+            $ok = $true
+        }
+        if ($ok) { return $result }
+    } catch {
+        Write-Host "  WMI PerfRawData echec : $_" -ForegroundColor Yellow
+    }
+
+    # Méthode 3 : Get-Counter (EN uniquement pour la compatibilité)
+    try {
+        $sIn  = Get-Counter -Counter "\Network Interface(*)\Bytes Received/sec" `
+                -ErrorAction Stop
+        $sOut = Get-Counter -Counter "\Network Interface(*)\Bytes Sent/sec" `
+                -ErrorAction Stop
+        foreach ($cs in $sIn.CounterSamples) {
+            $iName = "$($cs.InstanceName)"
+            if (-not $result.ContainsKey($iName)) {
+                $result[$iName] = @{ BytesIn=[long]0; BytesOut=[long]0; Method="CTR" }
+            }
+            try { $result[$iName].BytesIn  = [long]$cs.CookedValue } catch {}
+        }
+        foreach ($cs in $sOut.CounterSamples) {
+            $iName = "$($cs.InstanceName)"
+            if (-not $result.ContainsKey($iName)) {
+                $result[$iName] = @{ BytesIn=[long]0; BytesOut=[long]0; Method="CTR" }
+            }
+            try { $result[$iName].BytesOut = [long]$cs.CookedValue } catch {}
+        }
+        if ($result.Count -gt 0) { return $result }
+    } catch {}
+
+    Write-Host "  WARN : Aucune methode compteur disponible !" -ForegroundColor Red
+    return $result
+}
+
+# ============================================================
+# SECTION 8 — MATCHING NOM INTERFACE ↔ CLÉ COMPTEUR
+# Le nom de l'interface (Get-NetAdapter) peut différer du nom
+# du compteur (WMI encode différemment les espaces et #)
+# 5 stratégies en cascade
+# ============================================================
+function Find-CounterKey {
+    param(
+        [string]$IfaceName,   # Nom Get-NetAdapter (ex: "Wi-Fi")
+        [string]$IfaceDesc,   # Description (ex: "Intel Wi-Fi 6E")
+        [hashtable]$Counters  # Résultat de Get-NetworkCounters
+    )
+    if ($Counters.Count -eq 0) { return $null }
+
+    # S1 : correspondance exacte (cas nominal)
+    foreach ($k in $Counters.Keys) {
+        if ($k -eq $IfaceName) { return $k }
+    }
+
+    # S2 : insensible à la casse
+    $nLow = $IfaceName.ToLower()
+    foreach ($k in $Counters.Keys) {
+        if ($k.ToLower() -eq $nLow) { return $k }
+    }
+
+    # S3 : contains bidirectionnel
+    foreach ($k in $Counters.Keys) {
+        $kl = $k.ToLower()
+        if ($kl.Contains($nLow))                          { return $k }
+        if ($nLow.Contains($kl) -and $kl.Length -gt 3)   { return $k }
+    }
+
+    # S4 : encodage WMI (espaces → _, # → _, caractères spéciaux → _)
+    $wmiEnc = $IfaceName.ToLower() -replace '[^a-z0-9]','_'
+    foreach ($k in $Counters.Keys) {
+        if (($k.ToLower() -replace '[^a-z0-9]','_') -eq $wmiEnc) { return $k }
+    }
+
+    # S5 : match sur les 8 premiers caractères alphanum de la description
+    if (-not [string]::IsNullOrEmpty($IfaceDesc)) {
+        $dClean = $IfaceDesc.ToLower() -replace '[^a-z0-9]',''
+        $dShort = if ($dClean.Length -gt 8) { $dClean.Substring(0,8) } else { $dClean }
+        foreach ($k in $Counters.Keys) {
+            $kClean = $k.ToLower() -replace '[^a-z0-9]',''
+            if ($dShort.Length -gt 4 -and $kClean.Contains($dShort)) { return $k }
+        }
+    }
+
+    # S6 : si une seule interface active et un seul compteur non-loopback
+    $real = @()
+    foreach ($k in $Counters.Keys) {
+        if ($k.ToLower() -notmatch 'loopback|isatap|teredo|6to4') { $real += $k }
+    }
+    if ($real.Count -eq 1 -and $script:interfaces.Count -eq 1) { return $real[0] }
+
+    return $null
+}
+
+# ============================================================
+# SECTION 9 — DEBUG AU DÉMARRAGE
+# Affiche les compteurs disponibles et le résultat du matching
+# ============================================================
+function Debug-Counters {
+    Write-Host ""
+    Write-Host "  === DEBUG COMPTEURS ===" -ForegroundColor Yellow
+    $counters = Get-NetworkCounters
+    if ($counters.Count -eq 0) {
+        Write-Host "  AUCUN compteur disponible !" -ForegroundColor Red
+    } else {
+        $meth = ""; foreach ($v in $counters.Values) { $meth = $v.Method; break }
+        Write-Host "  Methode : $meth | $($counters.Count) entrees" -ForegroundColor Cyan
+        foreach ($k in $counters.Keys) {
+            Write-Host "    '$k'  IN:$($counters[$k].BytesIn)  OUT:$($counters[$k].BytesOut)" `
+                       -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
+    Write-Host "  Matching interfaces :" -ForegroundColor Cyan
+    foreach ($ifName in $script:interfaces.Keys) {
+        $info = $script:ActiveIfaces[$ifName]
+        $desc = if ($null -ne $info) { $info.Description } else { "" }
+        $cKey = Find-CounterKey -IfaceName $ifName -IfaceDesc $desc -Counters $counters
+        if ($null -ne $cKey) {
+            Write-Host "    [OK]   '$ifName'  →  '$cKey'" -ForegroundColor Green
+        } else {
+            Write-Host "    [FAIL] '$ifName'  →  INTROUVABLE" -ForegroundColor Red
+        }
+    }
+    Write-Host "  ========================" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# ============================================================
+# SECTION 10 — INITIALISATION DES BUFFERS PAR INTERFACE
+# Chaque interface dispose de 4 vues (Live/Hour/Day/Week)
+# + accumulateurs de consolidation
+# ============================================================
+function Init-InterfaceBuffers {
+    param([string]$Name)
+
+    $script:interfaces[$Name] = @{
+        # ── Vue LIVE (1 pt / 5s, max 720 pts = 1h) ──────────
+        LiveTs    = @()       # Timestamps Unix ms
+        LiveIn    = @()       # Débit IN en Mbps
+        LiveOut   = @()       # Débit OUT en Mbps
+        LiveCount = [int]0
+
+        # ── Vue HOUR (1 pt / 30s, max 720 pts = 6h) ─────────
+        HourTs    = @(); HourIn    = @(); HourOut   = @(); HourCount  = [int]0
+
+        # ── Vue DAY (1 pt / 5min, max 720 pts = 2.5j) ───────
+        DayTs     = @(); DayIn     = @(); DayOut    = @(); DayCount   = [int]0
+
+        # ── Vue WEEK (1 pt / 30min, max 720 pts = 15j) ──────
+        WeekTs    = @(); WeekIn    = @(); WeekOut   = @(); WeekCount  = [int]0
+
+        # ── Statistiques globales ────────────────────────────
+        MaxIn     = [double]0   # Maximum IN depuis démarrage
+        MaxOut    = [double]0   # Maximum OUT
+        SumIn     = [double]0   # Somme pour calcul moyenne
+        SumOut    = [double]0
+        CurIn     = [double]0   # Valeur courante (dernière mesure)
+        CurOut    = [double]0
+        Samples   = [int]0      # Nombre total de mesures
+
+        # ── Accumulateurs consolidation HOUR (6 × 5s = 30s) ─
+        Acc30In   = [double]0; Acc30Out  = [double]0; Acc30N  = [int]0
+
+        # ── Accumulateurs consolidation DAY (60 × 5s = 5min) ─
+        Acc300In  = [double]0; Acc300Out = [double]0; Acc300N = [int]0
+
+        # ── Accumulateurs consolidation WEEK (360×5s = 30min) ─
+        Acc1800In = [double]0; Acc1800Out= [double]0; Acc1800N= [int]0
+    }
+
+    # Compteurs bruts précédents pour calcul différentiel
+    $script:rawCounters[$Name] = @{
+        LastIn  = [long]-1   # -1 = pas encore initialisé
+        LastOut = [long]-1
+        LastTs  = [long]-1
+    }
+}
+
+# ============================================================
+# SECTION 11 — AJOUT D'UN POINT DE MESURE
+# Appelée toutes les 5s avec les Mbps calculés
+# Met à jour les 4 vues et les accumulateurs
+# ============================================================
+function Add-DataPoint {
+    param(
+        [string]$IfaceName,
+        [double]$MbpsIn,
+        [double]$MbpsOut,
+        [long]$Ts           # Timestamp Unix ms
+    )
+    $iface = $script:interfaces[$IfaceName]
+    if ($null -eq $iface) { return }
+
+    # ── Mise à jour des stats globales ──────────────────────
+    $iface.CurIn   = $MbpsIn
+    $iface.CurOut  = $MbpsOut
+    $iface.Samples++
+    $iface.SumIn  += $MbpsIn
+    $iface.SumOut += $MbpsOut
+    if ($MbpsIn  -gt $iface.MaxIn)  { $iface.MaxIn  = $MbpsIn  }
+    if ($MbpsOut -gt $iface.MaxOut) { $iface.MaxOut = $MbpsOut }
+
+    # ── Vue LIVE : chaque point brut ────────────────────────
+    $iface.LiveTs   += $Ts
+    $iface.LiveIn   += $MbpsIn
+    $iface.LiveOut  += $MbpsOut
+    $iface.LiveCount++
+    # Fenêtre glissante : on tronque si dépassement
+    if ($iface.LiveCount -gt $MaxPoints) {
+        $cut = $iface.LiveCount - $MaxPoints
+        $iface.LiveTs    = $iface.LiveTs[$cut..($iface.LiveCount-1)]
+        $iface.LiveIn    = $iface.LiveIn[$cut..($iface.LiveCount-1)]
+        $iface.LiveOut   = $iface.LiveOut[$cut..($iface.LiveCount-1)]
+        $iface.LiveCount = $MaxPoints
+    }
+
+    # ── Vue HOUR : moyenne de 6 points (30s) ────────────────
+    $iface.Acc30In  += $MbpsIn
+    $iface.Acc30Out += $MbpsOut
+    $iface.Acc30N++
+    if ($iface.Acc30N -ge 6) {
+        $aI = Round-Double ($iface.Acc30In  / $iface.Acc30N) 4
+        $aO = Round-Double ($iface.Acc30Out / $iface.Acc30N) 4
+        $iface.HourTs   += $Ts
+        $iface.HourIn   += $aI
+        $iface.HourOut  += $aO
+        $iface.HourCount++
+        if ($iface.HourCount -gt $MaxPoints) {
+            $cut = $iface.HourCount - $MaxPoints
+            $iface.HourTs    = $iface.HourTs[$cut..($iface.HourCount-1)]
+            $iface.HourIn    = $iface.HourIn[$cut..($iface.HourCount-1)]
+            $iface.HourOut   = $iface.HourOut[$cut..($iface.HourCount-1)]
+            $iface.HourCount = $MaxPoints
+        }
+        # Reset accumulateur
+        $iface.Acc30In  = [double]0
+        $iface.Acc30Out = [double]0
+        $iface.Acc30N   = [int]0
+    }
+
+    # ── Vue DAY : moyenne de 60 points (5 min) ──────────────
+    $iface.Acc300In  += $MbpsIn
+    $iface.Acc300Out += $MbpsOut
+    $iface.Acc300N++
+    if ($iface.Acc300N -ge 60) {
+        $aI = Round-Double ($iface.Acc300In  / $iface.Acc300N) 4
+        $aO = Round-Double ($iface.Acc300Out / $iface.Acc300N) 4
+        $iface.DayTs   += $Ts
+        $iface.DayIn   += $aI
+        $iface.DayOut  += $aO
+        $iface.DayCount++
+        if ($iface.DayCount -gt $MaxPoints) {
+            $cut = $iface.DayCount - $MaxPoints
+            $iface.DayTs    = $iface.DayTs[$cut..($iface.DayCount-1)]
+            $iface.DayIn    = $iface.DayIn[$cut..($iface.DayCount-1)]
+            $iface.DayOut   = $iface.DayOut[$cut..($iface.DayCount-1)]
+            $iface.DayCount = $MaxPoints
+        }
+        $iface.Acc300In  = [double]0
+        $iface.Acc300Out = [double]0
+        $iface.Acc300N   = [int]0
+    }
+
+    # ── Vue WEEK : moyenne de 360 points (30 min) ───────────
+    $iface.Acc1800In  += $MbpsIn
+    $iface.Acc1800Out += $MbpsOut
+    $iface.Acc1800N++
+    if ($iface.Acc1800N -ge 360) {
+        $aI = Round-Double ($iface.Acc1800In  / $iface.Acc1800N) 4
+        $aO = Round-Double ($iface.Acc1800Out / $iface.Acc1800N) 4
+        $iface.WeekTs   += $Ts
+        $iface.WeekIn   += $aI
+        $iface.WeekOut  += $aO
+        $iface.WeekCount++
+        if ($iface.WeekCount -gt $MaxPoints) {
+            $cut = $iface.WeekCount - $MaxPoints
+            $iface.WeekTs    = $iface.WeekTs[$cut..($iface.WeekCount-1)]
+            $iface.WeekIn    = $iface.WeekIn[$cut..($iface.WeekCount-1)]
+            $iface.WeekOut   = $iface.WeekOut[$cut..($iface.WeekCount-1)]
+            $iface.WeekCount = $MaxPoints
+        }
+        $iface.Acc1800In  = [double]0
+        $iface.Acc1800Out = [double]0
+        $iface.Acc1800N   = [int]0
+    }
+}
+
+# ============================================================
+# SECTION 12 — COLLECTE DE LA BANDE PASSANTE
+# Calcule les Mbps par différence de compteurs octets
+# Gère l'overflow 32-bit des compteurs WMI
+# ============================================================
+function Collect-Bandwidth {
+    $counters = Get-NetworkCounters
+    $nowMs    = Get-NowMs
+
+    if ($counters.Count -eq 0) {
+        Write-Host "  WARN : Compteurs réseau vides !" -ForegroundColor Red
+        return
+    }
+
+    foreach ($ifName in $script:interfaces.Keys) {
+        $raw  = $script:rawCounters[$ifName]
+        $info = $script:ActiveIfaces[$ifName]
+        $desc = if ($null -ne $info) { "$($info.Description)" } else { "" }
+        if ($null -eq $raw) { continue }
+
+        # Trouver la clé compteur correspondant à cette interface
+        $cKey = Find-CounterKey -IfaceName $ifName -IfaceDesc $desc -Counters $counters
+        if ($null -eq $cKey) {
+            if (-not $script:debugDone) {
+                Write-Host "  WARN : Pas de compteur pour '$ifName'" -ForegroundColor Yellow
+            }
+            continue
+        }
+
+        $curIn  = [long]$counters[$cKey].BytesIn
+        $curOut = [long]$counters[$cKey].BytesOut
+
+        # Premier passage : initialisation uniquement, pas de calcul
+        if ($raw.LastTs -lt 0) {
+            $raw.LastIn  = $curIn
+            $raw.LastOut = $curOut
+            $raw.LastTs  = $nowMs
+            Write-Host "  Counter init OK : '$ifName' → '$cKey'" -ForegroundColor Green
+            continue
+        }
+
+        # Durée en secondes depuis la dernière mesure
+        $dtMs = $nowMs - $raw.LastTs
+        if ($dtMs -lt 100) { continue }   # Trop rapide, ignorer
+        $dtSec = [double]$dtMs / 1000.0
+
+        # Différence d'octets
+        $diffIn  = $curIn  - $raw.LastIn
+        $diffOut = $curOut - $raw.LastOut
+
+        # Gestion overflow 32-bit des compteurs WMI
+        # (les compteurs repassent à 0 après 4 294 967 295)
+        $ov32 = [long]4294967295 + [long]1
+        if ($diffIn  -lt 0 -and $diffIn  -gt -$ov32) { $diffIn  = $diffIn  + $ov32 }
+        if ($diffOut -lt 0 -and $diffOut -gt -$ov32) { $diffOut = $diffOut + $ov32 }
+        # Valeur négative résiduelle = reset compteur (reboot)
+        if ($diffIn  -lt 0) { $diffIn  = [long]0 }
+        if ($diffOut -lt 0) { $diffOut = [long]0 }
+
+        # Conversion octets/s → Mbps
+        # Formule : (bytes / secondes) × 8 bits/byte / 1 000 000 bits/Mbit
+        $mbpsIn  = [double]$diffIn  / $dtSec * 8.0 / 1000000.0
+        $mbpsOut = [double]$diffOut / $dtSec * 8.0 / 1000000.0
+
+        # Sanity check : valeur impossible (bug compteur ou overflow non géré)
+        if ($mbpsIn  -gt 200000 -or $mbpsIn  -lt 0) { $mbpsIn  = [double]0 }
+        if ($mbpsOut -gt 200000 -or $mbpsOut -lt 0) { $mbpsOut = [double]0 }
+
+        Add-DataPoint -IfaceName $ifName -MbpsIn $mbpsIn -MbpsOut $mbpsOut -Ts $nowMs
+
+        # Sauvegarde pour la prochaine itération
+        $raw.LastIn  = $curIn
+        $raw.LastOut = $curOut
+        $raw.LastTs  = $nowMs
+    }
+
+    $script:debugDone = $true
+}
+
+# ============================================================
+# SECTION 13 — SÉRIALISATION D'UNE VUE EN JSON
+# Produit un tableau JS [{t:...,i:...,o:...}, ...]
+# ⚠️ Double-ToJs obligatoire pour éviter la virgule locale FR
+# ============================================================
+function Serialize-View {
+    param(
+        [array]$Ts,     # Tableau de timestamps
+        [array]$In,     # Tableau de débits IN (Mbps)
+        [array]$Out,    # Tableau de débits OUT (Mbps)
+        [int]$Count     # Nombre de points valides
+    )
+    $pts = @()
+    for ($i = 0; $i -lt $Count; $i++) {
+        $t  = [long]$Ts[$i]
+        $vi = Double-ToJs ([double]$In[$i])
+        $vo = Double-ToJs ([double]$Out[$i])
+        $pts += "{t:$t,i:$vi,o:$vo}"
+    }
+    return "[" + ($pts -join ",") + "]"
+}
+
+# ============================================================
+# SECTION 14 — ÉCRITURE DU FICHIER network_data.js
+# Ce fichier est rechargé par le browser toutes les 2s
+# Il définit window.MD avec toutes les données courantes
+# ============================================================
+function Write-DataJs {
+    # Calcul de la durée d'exécution
+    $elapsed = Get-ElapsedSec
+    $hh = [int]($elapsed / 3600)
+    $mm = [int](($elapsed % 3600) / 60)
+    $ss = $elapsed % 60
+    $durStr = "$("{0:D2}" -f $hh)h $("{0:D2}" -f $mm)m $("{0:D2}" -f $ss)s"
+    $nowStr = Get-Date -Format "HH:mm:ss"
+
+    # Construction du JSON des interfaces
+    $ifParts = @()
+    foreach ($ifName in $script:interfaces.Keys) {
+        $iface    = $script:interfaces[$ifName]
+        $info     = $script:ActiveIfaces[$ifName]
+        $descr    = ""
+        $linkMbps = [double]0
+        if ($null -ne $info) {
+            $descr    = "$($info.Description)" -replace '"','\"'
+            $linkMbps = [double]$info.LinkSpeedMbps
+        }
+
+        # Sérialisation des 4 vues
+        $liveJs = Serialize-View $iface.LiveTs $iface.LiveIn $iface.LiveOut $iface.LiveCount
+        $hourJs = Serialize-View $iface.HourTs $iface.HourIn $iface.HourOut $iface.HourCount
+        $dayJs  = Serialize-View $iface.DayTs  $iface.DayIn  $iface.DayOut  $iface.DayCount
+        $weekJs = Serialize-View $iface.WeekTs $iface.WeekIn $iface.WeekOut $iface.WeekCount
+
+        # Calcul des moyennes globales
+        $avgIn  = [double]0
+        $avgOut = [double]0
+        if ($iface.Samples -gt 0) {
+            $avgIn  = Round-Double ($iface.SumIn  / $iface.Samples) 4
+            $avgOut = Round-Double ($iface.SumOut / $iface.Samples) 4
+        }
+
+        $safeName = "$ifName" -replace '"','\"'
+        $ifParts += """$safeName"":{" +
+            """desc"":""$descr""," +
+            """link"":$(Double-ToJs $linkMbps)," +
+            """curIn"":$(Double-ToJs $iface.CurIn)," +
+            """curOut"":$(Double-ToJs $iface.CurOut)," +
+            """maxIn"":$(Double-ToJs $iface.MaxIn)," +
+            """maxOut"":$(Double-ToJs $iface.MaxOut)," +
+            """avgIn"":$(Double-ToJs $avgIn)," +
+            """avgOut"":$(Double-ToJs $avgOut)," +
+            """samples"":$($iface.Samples)," +
+            """live"":$liveJs," +
+            """hour"":$hourJs," +
+            """day"":$dayJs," +
+            """week"":$weekJs}"
+    }
+
+    # Sérialisation du mode d'échelle Y
+    $ysModeJs    = if ($script:YScaleMode -eq "auto") {
+                       """auto"""
+                   } else {
+                       "$(Double-ToJs ([double]$script:YScaleMode))"
+                   }
+    $thrEnabledJs = if ($script:ThresholdEnabled) { "true" } else { "false" }
+
+    # Écriture du fichier JS
+    $js = "window.MD={" +
+          "ifaces:{" + ($ifParts -join ",") + "}," +
+          "threshold:$(Double-ToJs ([double]$script:ThresholdAlert))," +
+          "thresholdEnabled:$thrEnabledJs," +
+          "yScaleMode:$ysModeJs," +
+          "dur:""$durStr""," +
+          "now:""$nowStr""," +
+          "startMs:$($script:startMs)" +
+          "};"
+
+    try { $js | Set-Content -Path $dataFile -Encoding UTF8 -ErrorAction Stop } catch {}
+}
+
+# ============================================================
+# SECTION 15 — LECTURE DES COMMANDES DU BROWSER
+# Le browser peut écrire dans mrtg_cmd.js pour modifier
+# threshold, yScale, etc. côté PS
+# ============================================================
+function Read-CmdFile {
+    if (-not (Test-Path $cmdFile)) { return }
+    try {
+        $raw = Get-Content -Path $cmdFile -Raw -ErrorAction SilentlyContinue
+        if (-not $raw) {
+            Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
+        # Mise à jour du seuil alarme
+        if ($raw -match '"threshold"\s*:\s*(\d+(?:[.,]\d+)?)') {
+            $tStr = $Matches[1] -replace ',','.'
+            $newT = [double]0
+            try { $newT = [double]$tStr } catch {}
+            if ($newT -gt 0 -and $newT -le 200000) {
+                $script:ThresholdAlert = $newT
+                Write-Host "  Threshold → $newT Mbps" -ForegroundColor Cyan
+            }
+        }
+
+        # Activation/désactivation du seuil
+        if ($raw -match '"thresholdEnabled"\s*:\s*(true|false)') {
+            $script:ThresholdEnabled = ($Matches[1] -eq "true")
+            Write-Host "  ThresholdEnabled → $($script:ThresholdEnabled)" -ForegroundColor Cyan
+        }
+
+        # Changement du mode d'échelle Y
+        if ($raw -match '"yScale"\s*:\s*"([^"]+)"') {
+            $newY = $Matches[1]
+            if ($newY -eq "auto") {
+                $script:YScaleMode = "auto"
+            } else {
+                $yStr = $newY -replace ',','.'
+                $yv   = [double]0
+                try { $yv = [double]$yStr } catch {}
+                if ($yv -gt 0) { $script:YScaleMode = "$yv" }
+            }
+        }
+
+        Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+# ============================================================
+# SECTION 16 — CHARGEMENT DE CHART.JS (OFFLINE)
+# Recherche chartjs.min.js dans plusieurs emplacements locaux
+# Fallback : tentative de téléchargement CDN
+# ============================================================
+function Get-ChartJsTag {
+    $candidates = @(
+        "$scriptTemp\chartjs.min.js",
+        "$scriptTemp\chart.min.js",
+        "$env:USERPROFILE\Documents\chartjs.min.js",
+        "$env:USERPROFILE\Documents\chart.min.js",
+        "$env:USERPROFILE\Desktop\chartjs.min.js"
+    )
+
+    Write-Host "  Chart.js : recherche locale..." -ForegroundColor Cyan
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        if (Test-Path $c) {
+            $src = Get-Content -Path $c -Raw -ErrorAction SilentlyContinue
+            if ($src -and $src.Length -gt 10000) {
+                Write-Host "  Chart.js : OK — $c ($([int]($src.Length/1024)) KB)" `
+                           -ForegroundColor Green
+                # Copie dans le dossier de travail si nécessaire
+                if ($c -ne "$scriptTemp\chartjs.min.js") {
+                    try {
+                        $src | Set-Content -Path "$scriptTemp\chartjs.min.js" `
+                               -Encoding UTF8 -ErrorAction SilentlyContinue
+                    } catch {}
+                }
+                return "<script>`n$src`n</script>"
+            }
+        }
+    }
+
+    # Tentative de téléchargement CDN (réseau disponible)
+    Write-Host "  Chart.js : tentative telechargement CDN..." -ForegroundColor Yellow
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent","PowerShell/5.1")
+        $src = $wc.DownloadString(
+            "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+        )
+        if ($src -and $src.Length -gt 10000) {
+            $src | Set-Content -Path "$scriptTemp\chartjs.min.js" `
+                   -Encoding UTF8 -ErrorAction SilentlyContinue
+            Write-Host "  Chart.js : telecharge OK" -ForegroundColor Green
+            return "<script>`n$src`n</script>"
+        }
+    } catch {
+        Write-Host "  Chart.js : telechargement impossible" -ForegroundColor Red
+    }
+
+    Write-Host "  >> ACTION : Deposez chartjs.min.js dans : $scriptTemp" -ForegroundColor Yellow
+    # Fallback CDN inline (nécessite internet dans le browser)
+    return '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
+}
+
+# ============================================================
+# SECTION 17 — OUVERTURE DU NAVIGATEUR
+# ============================================================
+function Open-Browser {
+    param([string]$FilePath)
+    $browsers = @(
+        "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        "C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        "C:\Program Files\Mozilla Firefox\firefox.exe"
+    )
+    $found = $null
+    foreach ($b in $browsers) { if (Test-Path $b) { $found = $b; break } }
+    if ($found) {
+        Write-Host "  Navigateur : $(Split-Path $found -Leaf)" -ForegroundColor Green
+        Start-Process -FilePath $found -ArgumentList "`"$FilePath`""
+    } else {
+        Start-Process $FilePath
+    }
+}
+
+# ============================================================
+# SECTION 18 — GÉNÉRATION DU HTML
+# Génère dashboard.html avec Chart.js embarqué
+# Le HTML est statique, les données arrivent via network_data.js
+# ============================================================
+function Write-HtmlOnce {
+    $dataFileJs  = $dataFile -replace '\\','\\\\'
+    $chartJsTag  = Get-ChartJsTag
+    $initThr     = $ThresholdAlertMbps
+    $initThrEn   = if ($ThresholdEnabled) { "true" } else { "false" }
+    $initYScale  = if ($script:YScaleMode -eq "auto") { "auto" } else { $script:YScaleMode }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>PS-MRTG v1.16 — MRTG Bandwidth Monitor</title>
+$chartJsTag
+<style>
+/* ── Variables CSS thème dark (défaut) ───────────────────── */
+:root{
+  --bg:#1a1a2e;--surface:#16213e;--surface2:#0d1b2a;--surface3:#0a1220;
+  --border:#0f3460;--border2:#1e3050;--border3:#0a1830;
+  --text:#e0e0e0;--text2:#a0b0c0;--text3:#556677;--text4:#778899;
+  --accent:#4cc9f0;--accent2:#0f3460;
+  --ok:#4ade80;--warn:#fb923c;--danger:#f87171;
+  --tab1-bg:#0d1b2a;--tab1-act:#16213e;--tab1-c:#778899;
+  --tab1-act-c:#4cc9f0;--tab1-bd:#0f3460;
+  --tab2-bg:#0a1220;--tab2-act:#16213e;--tab2-c:#556677;
+  --tab2-act-c:#e0e0e0;--tab2-bd:#0f2040;
+  --inp-bg:#0d1b2a;--inp-bd:#0f3460;
+  --btn-bg:#0f3460;--btn-c:#4cc9f0;
+  --btn2-bg:rgba(248,113,113,.15);--btn2-c:#f87171;
+  --in-c:rgba(74,222,128,.95);--in-f:rgba(74,222,128,.12);
+  --out-c:rgba(76,201,240,.95);--out-f:rgba(76,201,240,.10);
+  --thr-gray:rgba(180,180,200,.45);--thr-red:rgba(248,113,113,.85);
+  --grid:rgba(80,80,120,.15);--grid2:rgba(80,80,120,.2);
+  --tick:#556677;--tickY:#a0b0c0;--tickU:#778899;
+  --sb-bg:#0d1117;--sb-th:#1e3050;
+  --cell-bg:#0d1b2a;--cell-bd:#1e3050;
+  --opt-bg:#0a1520;--opt-bd:#0f3460;
+}
+/* ── Variables CSS thème light ───────────────────────────── */
+[data-theme="light"]{
+  --bg:#f0f4f8;--surface:#ffffff;--surface2:#e8edf5;--surface3:#dde4ee;
+  --border:#b0c0d8;--border2:#c8d4e8;--border3:#d0dcea;
+  --text:#0f1923;--text2:#3a5070;--text3:#8090a8;--text4:#607090;
+  --accent:#0063be;--accent2:#dde9f8;--ok:#007a5e;--warn:#b86000;--danger:#c0202e;
+  --tab1-bg:#e8edf5;--tab1-act:#ffffff;--tab1-c:#607090;
+  --tab1-act-c:#0063be;--tab1-bd:#b0c0d8;
+  --tab2-bg:#dde4ee;--tab2-act:#ffffff;--tab2-c:#8090a8;
+  --tab2-act-c:#0f1923;--tab2-bd:#c0cfe0;
+  --inp-bg:#ffffff;--inp-bd:#b0c0d8;
+  --btn-bg:#dde9f8;--btn-c:#0063be;
+  --btn2-bg:rgba(192,32,46,.08);--btn2-c:#c0202e;
+  --in-c:rgba(0,140,80,.95);--in-f:rgba(0,180,100,.10);
+  --out-c:rgba(0,99,190,.95);--out-f:rgba(0,99,190,.08);
+  --thr-gray:rgba(100,120,150,.5);--thr-red:rgba(192,32,46,.8);
+  --grid:rgba(100,120,160,.12);--grid2:rgba(100,120,160,.18);
+  --tick:#8090a8;--tickY:#3a5070;--tickU:#607090;
+  --sb-bg:#e8edf5;--sb-th:#b0c0d8;
+  --cell-bg:#f8fafc;--cell-bd:#c8d4e8;
+  --opt-bg:#eef2f8;--opt-bd:#b0c0d8;
+}
+/* ── Reset & base ────────────────────────────────────────── */
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);
+     font-family:'Segoe UI',Consolas,monospace;
+     display:flex;flex-direction:column;height:100vh;overflow:hidden;
+     transition:background .25s,color .25s}
+
+/* ── Header ──────────────────────────────────────────────── */
+.hdr{background:var(--surface);padding:6px 16px;
+     border-bottom:2px solid var(--border);
+     display:flex;align-items:center;justify-content:space-between;
+     gap:10px;min-height:42px;flex-shrink:0}
+.hl{display:flex;align-items:center;gap:10px}
+.hdr h1{font-size:1.02em;font-weight:bold;white-space:nowrap}
+.vtag{background:var(--accent2);color:var(--accent);font-size:.7em;
+      padding:2px 7px;border-radius:10px;font-weight:bold}
+.hr2{display:flex;gap:8px;align-items:center;flex-shrink:0}
+/* Point clignotant indiquant l'activité du monitoring */
+.hdot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+      animation:pl 1.2s infinite;flex-shrink:0}
+.dur{color:var(--warn);font-size:.83em;font-weight:bold;white-space:nowrap}
+.nowt{color:var(--text3);font-size:.8em;white-space:nowrap}
+.thbtn{background:transparent;border:1px solid var(--border2);color:var(--text3);
+       font-size:.73em;padding:3px 9px;border-radius:4px;cursor:pointer;white-space:nowrap}
+.thbtn:hover{filter:brightness(1.25)}
+@keyframes pl{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ── Tabs niveau 1 : sélection de l'interface ────────────── */
+.tabs1{background:var(--tab1-bg);border-bottom:2px solid var(--border);
+       display:flex;align-items:flex-end;padding:0 12px;
+       gap:2px;flex-shrink:0;overflow-x:auto;min-height:36px}
+.tabs1::-webkit-scrollbar{height:3px}
+.tabs1::-webkit-scrollbar-thumb{background:var(--sb-th)}
+.t1btn{padding:7px 15px;font-size:.8em;font-weight:600;color:var(--tab1-c);
+       cursor:pointer;border-radius:6px 6px 0 0;border:1px solid transparent;
+       border-bottom:none;white-space:nowrap;transition:all .15s;
+       background:transparent;display:flex;align-items:center;gap:6px}
+.t1btn:hover{color:var(--tab1-act-c);background:var(--surface2)}
+.t1btn.a{background:var(--tab1-act);color:var(--tab1-act-c);
+          border-color:var(--tab1-bd);border-bottom-color:var(--tab1-act)}
+/* Petit point vert clignotant dans chaque tab interface */
+.t1dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
+       animation:pl 1.4s infinite;flex-shrink:0}
+
+/* ── Panneau par interface ───────────────────────────────── */
+.iface-panel{display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0}
+.iface-panel.a{display:flex}
+
+/* ── Barre de stats (IN/OUT/Max/Moy) ────────────────────── */
+.ibar{background:var(--surface2);padding:0 14px;
+      border-bottom:1px solid var(--border2);
+      display:flex;align-items:center;font-size:.78em;
+      height:26px;flex-shrink:0;overflow:hidden}
+.sp{width:1px;height:13px;background:var(--border2);margin:0 9px;flex-shrink:0}
+.si{display:flex;gap:3px;align-items:center;flex-shrink:0;white-space:nowrap}
+.sl{color:var(--text3)}.sv{font-weight:bold}
+.sin{color:var(--ok)}.sout{color:var(--accent)}.sn{color:var(--text2)}
+
+/* ── Tabs niveau 2 : sélection de la vue temporelle ─────── */
+.tabs2{background:var(--tab2-bg);padding:0 12px;
+       display:flex;align-items:center;gap:3px;
+       border-bottom:1px solid var(--border2);min-height:32px;flex-shrink:0}
+.t2btn{padding:4px 12px;font-size:.75em;font-weight:600;color:var(--tab2-c);
+       cursor:pointer;border-radius:4px;white-space:nowrap;transition:all .15s;
+       border:1px solid transparent;background:transparent}
+.t2btn:hover{color:var(--tab2-act-c);background:var(--surface2)}
+.t2btn.a{background:var(--tab2-act);color:var(--tab2-act-c);border-color:var(--tab2-bd)}
+.t2all{color:var(--accent)}.t2all.a{background:var(--accent2);border-color:var(--accent)}
+
+/* ── Zone graphiques ─────────────────────────────────────── */
+.gcont{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+/* Vue individuelle (pleine largeur) */
+.gview{display:none;flex:1;flex-direction:column;
+       padding:10px 12px 6px;overflow:hidden;min-height:0}
+.gview.a{display:flex}
+.gview canvas{flex:1;min-height:0}
+/* Vue "Tous" : grille 2×2 des 4 graphiques */
+.gall{display:none;flex:1;overflow:hidden;
+      grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;
+      gap:6px;padding:6px 12px}
+.gall.a{display:grid}
+.gcell{background:var(--cell-bg);border:1px solid var(--cell-bd);
+       border-radius:5px;padding:6px 8px;
+       display:flex;flex-direction:column;overflow:hidden;min-height:0}
+/* Entête d'une cellule graphique (label + stats mini) */
+.gclbl{font-size:.7em;font-weight:bold;color:var(--text3);margin-bottom:3px;
+       flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+.gclbl-s{font-size:.85em;color:var(--text4)}
+.gcell canvas{flex:1;min-height:0}
+
+/* ── Footer : bouton snapshot + panneau Options ──────────── */
+.fbar{background:var(--surface);border-top:1px solid var(--border);
+      padding:0;display:flex;flex-direction:column;flex-shrink:0}
+.fbar-main{display:flex;align-items:center;gap:10px;
+           padding:5px 14px;flex-wrap:wrap;min-height:40px}
+/* Panneau options (foldable) */
+.fbar-opts{background:var(--opt-bg);border-top:1px solid var(--opt-bd);
+           padding:7px 14px;display:none;flex-wrap:wrap;gap:14px;align-items:center}
+.fbar-opts.open{display:flex}
+.opt-group{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.opt-title{color:var(--text3);font-size:.68em;font-weight:700;
+           text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+.opt-sep{width:1px;height:22px;background:var(--border2);flex-shrink:0}
+
+/* ── Contrôles du panneau Options ────────────────────────── */
+.ci{display:flex;align-items:center;gap:5px}
+.ci label{color:var(--text3);font-size:.76em;white-space:nowrap}
+/* Slider taille des points */
+.sg{display:flex;align-items:center;gap:5px}
+.sg label{color:var(--text3);font-size:.75em;white-space:nowrap}
+.sg .sv2{color:var(--accent);font-weight:bold;font-size:.78em;min-width:48px}
+input[type=range]{width:90px;accent-color:var(--accent);cursor:pointer}
+input[type=number]{background:var(--inp-bg);border:1px solid var(--inp-bd);
+                   color:var(--accent);padding:3px 7px;border-radius:4px;
+                   font-size:.8em;width:85px;
+                   font-family:Consolas,monospace;font-weight:bold}
+input[type=number]:focus{outline:2px solid var(--accent)}
+/* Checkbox activation du seuil */
+.thr-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;
+            font-size:.76em;color:var(--text2);user-select:none}
+.thr-toggle input[type=checkbox]{width:14px;height:14px;cursor:pointer;
+                                  accent-color:var(--danger)}
+select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accent);
+       padding:3px 6px;border-radius:4px;font-size:.78em;
+       font-family:Consolas,monospace;font-weight:bold;cursor:pointer}
+/* Boutons */
+.btn{padding:4px 11px;border:1px solid var(--border2);border-radius:4px;
+     cursor:pointer;font-size:.76em;font-weight:bold;white-space:nowrap;
+     background:var(--btn-bg);color:var(--btn-c);transition:opacity .15s}
+.btn:hover{opacity:.8}
+.btn-opt{background:transparent;border-color:var(--text3);color:var(--text3);
+         font-size:.72em;padding:3px 9px}
+.btn-opt:hover{color:var(--accent);border-color:var(--accent);opacity:1}
+.btnsnap{background:var(--btn2-bg);color:var(--btn2-c);border-color:var(--btn2-c)}
+/* Légende IN/OUT/10M/Seuil */
+.leg{display:flex;gap:10px;align-items:center;margin-left:auto}
+.legitem{display:flex;align-items:center;gap:4px;font-size:.73em;color:var(--text2)}
+.legline{width:18px;height:3px;border-radius:2px}
+.legin{background:var(--ok)}.legout{background:var(--accent)}
+/* Badge d'échelle Y dans le header */
+.yscale-badge{font-size:.72em;font-weight:bold;background:var(--accent2);
+              color:var(--accent);padding:2px 8px;border-radius:10px;
+              border:1px solid var(--border2);white-space:nowrap}
+/* Scrollbar custom */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--sb-bg)}
+::-webkit-scrollbar-thumb{background:var(--sb-th);border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────── -->
+<div class="hdr">
+  <div class="hl">
+    <span class="hdot"></span>
+    <h1>PS&#8209;MRTG&nbsp;
+      <span style="color:var(--text3);font-weight:normal;font-size:.85em">
+        MRTG Bandwidth Monitor
+      </span>
+    </h1>
+    <span class="vtag">v1.16</span>
+  </div>
+  <div class="hr2">
+    <!-- Badge mode échelle Y courant -->
+    <span class="yscale-badge" id="ysBadge">Y: Auto</span>
+    <span class="nowt" id="nowLbl">--:--:--</span>
+    <span class="dur"  id="durLbl">00h 00m 00s</span>
+    <button class="thbtn" id="thBtn" onclick="togTheme()">&#9728; Light</button>
+  </div>
+</div>
+
+<!-- ── TABS NIVEAU 1 : interfaces (générés dynamiquement) ── -->
+<div class="tabs1" id="tabs1"></div>
+
+<!-- ── PANNEAUX PAR INTERFACE (générés dynamiquement) ─────── -->
+<div id="panels" style="flex:1;display:flex;flex-direction:column;
+     overflow:hidden;min-height:0"></div>
+
+<!-- ── FOOTER ─────────────────────────────────────────────── -->
+<div class="fbar">
+  <!-- Barre principale footer -->
+  <div class="fbar-main">
+    <button class="btn btnsnap" onclick="exportSnapshot()">
+      &#128247; Snapshot HTML
+    </button>
+    <!-- Légende des couleurs -->
+    <div class="leg">
+      <div class="legitem">
+        <div class="legline legin"></div>&#8595; IN
+      </div>
+      <div class="legitem">
+        <div class="legline legout"></div>&#8593; OUT
+      </div>
+      <div class="legitem" style="color:var(--text3)">
+        <div style="width:18px;height:2px;
+             border-top:2px dashed rgba(180,180,200,.45)"></div>
+        10M
+      </div>
+      <div class="legitem" id="legThr" style="color:var(--danger)">
+        <div style="width:18px;height:2px;
+             border-top:2px dashed rgba(248,113,113,.85)"></div>
+        Seuil
+      </div>
+    </div>
+    <button class="btn btn-opt" id="optToggle" onclick="togOpts()">
+      &#9660; Options
+    </button>
+  </div>
+
+  <!-- Panneau Options (foldable, fermé par défaut) -->
+  <div class="fbar-opts" id="fbarOpts">
+
+    <!-- Groupe : Seuil alarme -->
+    <div class="opt-group">
+      <span class="opt-title">Seuil alarme</span>
+      <!-- Checkbox activer/désactiver le seuil -->
+      <label class="thr-toggle">
+        <input type="checkbox" id="thrEnabled" onchange="toggleThr()">
+        <span>Actif</span>
+      </label>
+      <!-- Champ valeur + bouton appliquer -->
+      <div class="ci" id="thrInputGroup">
+        <input type="number" id="thrInput" value="$initThr" min="1" max="200000">
+        <span style="color:var(--text3);font-size:.76em">Mbps</span>
+        <button class="btn" onclick="applyThr()">OK</button>
+      </div>
+    </div>
+
+    <div class="opt-sep"></div>
+
+    <!-- Groupe : Echelle Y -->
+    <div class="opt-group">
+      <span class="opt-title">Echelle Y</span>
+      <select id="ysSelect" onchange="applyYScale()">
+        <option value="auto">Auto (paliers)</option>
+        <option value="10">10 Mbps</option>
+        <option value="20">20 Mbps</option>
+        <option value="50">50 Mbps</option>
+        <option value="100">100 Mbps</option>
+        <option value="200">200 Mbps</option>
+        <option value="500">500 Mbps</option>
+        <option value="1000">1 Gbps</option>
+        <option value="2000">2 Gbps</option>
+        <option value="5000">5 Gbps</option>
+        <option value="10000">10 Gbps</option>
+        <option value="100000">100 Gbps</option>
+        <option value="200000">200 Gbps</option>
+      </select>
+    </div>
+
+    <div class="opt-sep"></div>
+
+    <!-- Groupe : Taille des points -->
+    <div class="opt-group">
+      <span class="opt-title">Points</span>
+      <div class="sg">
+        <label>Taille :</label>
+        <input type="range" id="sPtSize" min="0" max="8" step="0.5" value="0.5"
+               oninput="updPtSize(this.value)">
+        <span class="sv2" id="vPtSize">0.5 px</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+var DJP = '$dataFileJs';  // Chemin du fichier network_data.js
+
+// ============================================================
+// ÉTAT GLOBAL DE L'UI
+// ============================================================
+var MD          = null;    // Dernières données reçues de PS
+var charts      = {};      // Registre des Chart instances (clé = sid_view_suf)
+var curIface    = null;    // Interface active actuellement affichée
+var curViews    = {};      // Vue active par interface (all/live/hour/day/week)
+var darkMode    = true;    // Thème courant
+var optsOpen    = false;   // Panneau Options ouvert/fermé
+var ifaceOrder  = [];      // Ordre des interfaces (pour la cohérence)
+var initialized = false;   // Panels HTML déjà construits
+
+// Paliers automatiques d'échelle Y (Mbps) — progression fine 1-2-5
+// ✅ v1.10 : paliers intermédiaires ajoutés (notamment 200 et 500 Mbps)
+//    pour éviter les sauts brutaux 100 Mbps → 1 Gbps.
+var Y_STEPS = [1, 2, 5, 10, 20, 50, 100, 200, 500,
+               1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000];
+
+// Paramètres Options — initialisés depuis PS une seule fois (uiInitDone)
+var thrVal      = $initThr;       // Valeur du seuil en Mbps
+var thrEnabled  = $initThrEn;     // Seuil actif ou non
+var yScaleMode  = '$initYScale';  // "auto" ou valeur numérique
+var ptSize      = 0.5;            // Taille des points en px (défaut 0.5)
+
+// ✅ FLAG CRITIQUE : PS initialise l'UI une seule fois au chargement
+// Sans ce flag, chaque cycle de 2s écraserait les choix utilisateur
+var uiInitDone  = false;
+
+var VIEWS = ['live','hour','day','week'];
+// Libellé court affiché à côté de chaque graphique : RÉSOLUTION + RECUL.
+// ✅ v1.14 : la période couverte (le « recul ») est désormais explicite.
+//    Correction : la vue « hour » couvre en réalité 6h (et non 1h).
+var VL    = {
+  live : 'Live \u00B7 1h (5s)',
+  hour : '6h (30s)',
+  day  : '2.5j (5min)',
+  week : '15j (30min)'
+};
+// Infobulle (title) : explication complète du recul, au survol.
+var VLT   = {
+  live : 'Temps r\u00E9el \u2014 recul 1 heure (1 point / 5 s)',
+  hour : 'Recul 6 heures (1 point / 30 s)',
+  day  : 'Recul 2,5 jours (1 point / 5 min)',
+  week : 'Recul 15 jours (1 point / 30 min)'
+};
+// ✅ v1.15 : durée de la fenêtre temporelle de chaque vue (en ms).
+//   Sert à fixer le domaine de l'axe X → les données s'affichent à leur
+//   position réelle (un historique partiel n'occupe qu'une fraction de
+//   la largeur, pas toute la largeur).
+var VWIN  = {
+  live : 3600000,      //  1 h   = 60 * 60 * 1000
+  hour : 21600000,     //  6 h   = 6 * 3600 * 1000
+  day  : 216000000,    //  2,5 j = 60 * 3600 * 1000
+  week : 1296000000    //  15 j  = 15 * 24 * 3600 * 1000
+};
+
+// ============================================================
+// THÈME DARK/LIGHT
+// ============================================================
+function togTheme(){
+  darkMode = !darkMode;
+  document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  document.getElementById('thBtn').innerHTML = darkMode ? '&#9728; Light' : '&#9790; Dark';
+  redrawAll();
+}
+
+// ============================================================
+// PANNEAU OPTIONS (foldable)
+// ============================================================
+function togOpts(){
+  optsOpen = !optsOpen;
+  var el = document.getElementById('fbarOpts');
+  var bt = document.getElementById('optToggle');
+  if(optsOpen){ el.classList.add('open');    bt.innerHTML = '&#9650; Options'; }
+  else        { el.classList.remove('open'); bt.innerHTML = '&#9660; Options'; }
+}
+
+// ============================================================
+// HELPERS UTILITAIRES
+// ============================================================
+
+// Lit une variable CSS définie dans :root
+function gcs(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// Échappe le HTML pour éviter les injections
+function escH(s){
+  if(!s) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Transforme un nom en identifiant CSS safe (alphanum + _)
+function sid(s){ return s.replace(/[^a-zA-Z0-9]/g,'_'); }
+
+// Formate un timestamp Unix ms pour l'axe X, selon la vue.
+// ✅ v1.13 : les vues multi-jours (day/week) affichent la date ET l'heure
+//    sur UNE SEULE ligne, au format « JJ/MM HH:MM ». Les graduations
+//    sont espacées (3 en grille / 6 en plein écran) pour garantir qu'aucun
+//    libellé ne se chevauche.
+function ft(ms, view){
+  var n = parseInt(ms,10);
+  if(isNaN(n) || n <= 0) return '';
+  var d  = new Date(n);
+  var hh = ('0'+d.getHours()).slice(-2);
+  var mm = ('0'+d.getMinutes()).slice(-2);
+  var ss = ('0'+d.getSeconds()).slice(-2);
+  var dm = ('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2);
+  // Live (≈1h) : précision à la seconde
+  if(view === 'live') return hh+':'+mm+':'+ss;
+  // 1h (≈6h) : heure:minute (toujours le même jour à l'écran)
+  if(view === 'hour') return hh+':'+mm;
+  // Day (2.5j) & Week (15j) : date + heure sur une seule ligne
+  return dm+' '+hh+':'+mm;
+}
+
+// Formate un timestamp complet pour l'infobulle (titre du tooltip).
+// ✅ v1.15 : « JJ/MM HH:MM:SS » — l'axe X étant numérique (ms), il faut
+//    reformater nous-mêmes le titre du tooltip.
+function ftTip(ms){
+  var n = parseInt(ms,10);
+  if(isNaN(n) || n <= 0) return '';
+  var d = new Date(n);
+  return ('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2)+' '+
+         ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+
+         ('0'+d.getSeconds()).slice(-2);
+}
+
+// Formate une valeur Mbps en string lisible (1 ligne — tooltips/stats)
+function fmb(v){
+  v = parseFloat(v);
+  if(isNaN(v) || v < 0) return '--';
+  if(v === 0)   return '0 Kbps';
+  if(v >= 1000) return (v/1000).toFixed(2)+' Gbps';
+  if(v >= 1)    return v.toFixed(2)+' Mbps';
+  return (v*1000).toFixed(0)+' Kbps';
+}
+
+// ============================================================
+// FORMATAGE DES GRADUATIONS DE L'AXE Y (multi-lignes)
+// ✅ v1.9 : pour un axe lisible, on renvoie un TABLEAU à Chart.js v4
+//    → la valeur s'affiche sur la 1re ligne, l'unité sur la 2e ligne.
+//    L'unité est choisie par valeur (comme fmb) : 200→"200 Mbps",
+//    1000→"1 Gbps", ce qui reste naturel même sur un axe mixte.
+// ============================================================
+function yTick(value){
+  var v = parseFloat(value);
+  if(isNaN(v) || v < 0) return '';
+  if(v === 0) return '0';                 // le zéro reste sur 1 ligne, sans unité
+  if(v >= 1000){
+    var g = v / 1000;
+    var gs = (g % 1 === 0) ? String(g)
+            : g.toFixed(2).replace(/0+$/,'').replace(/\.$/,'');
+    return [gs, 'Gbps'];                   // ligne 1 = valeur, ligne 2 = unité
+  }
+  if(v >= 1){
+    var ms = (v % 1 === 0) ? String(v) : v.toFixed(1);
+    return [ms, 'Mbps'];
+  }
+  return [String(Math.round(v * 1000)), 'Kbps'];
+}
+
+// Met à jour le textContent d'un élément par son id
+function sel(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; }
+
+// ============================================================
+// ÉCHELLE Y — CALCUL DU PALIER
+// ============================================================
+
+// Calcule le yMax (palier) selon le mode et une valeur max fournie.
+// ⚠️ v1.9 : l'inclusion éventuelle du seuil est gérée PAR L'APPELANT
+//    (updateChartsForIface), qui passe max(données, seuil) pour que la
+//    ligne d'alarme reste visible et que les 4 vues partagent la même hauteur.
+function calcYMax(dataMax){
+  if(yScaleMode !== 'auto'){ return parseFloat(yScaleMode) || 1000; }
+  // Mode auto : premier palier qui contient la valeur
+  for(var i=0; i<Y_STEPS.length; i++){
+    if(dataMax <= Y_STEPS[i]){ return Y_STEPS[i]; }
+  }
+  return Y_STEPS[Y_STEPS.length-1];
+}
+
+// Met à jour le badge Y: dans le header
+function updateYBadge(){
+  var badge = document.getElementById('ysBadge');
+  if(!badge) return;
+  if(yScaleMode === 'auto'){
+    badge.textContent = 'Y: Auto';
+    badge.style.color = '';
+    badge.style.background = '';
+    badge.style.borderColor = '';
+  } else {
+    badge.textContent = 'Y: ' + fmb(parseFloat(yScaleMode));
+    badge.style.color = 'var(--warn)';
+    badge.style.background = 'rgba(251,146,60,.12)';
+    badge.style.borderColor = 'rgba(251,146,60,.4)';
+  }
+}
+
+// Synchronise le select Echelle Y avec yScaleMode courant
+function syncYSelect(){
+  var s = document.getElementById('ysSelect');
+  if(!s) return;
+  for(var i=0; i<s.options.length; i++){
+    if(s.options[i].value === String(yScaleMode)){ s.selectedIndex=i; break; }
+  }
+}
+
+// Handler select Echelle Y
+function applyYScale(){
+  yScaleMode = document.getElementById('ysSelect').value;
+  updateYBadge();
+  redrawAll();
+}
+
+// ============================================================
+// SEUIL ALARME
+// ============================================================
+
+// Toggle checkbox Actif/Inactif
+// ⚠️ uiInitDone garantit que ce choix ne sera pas réécrasé par PS
+function toggleThr(){
+  thrEnabled = document.getElementById('thrEnabled').checked;
+  updateThrUI();
+  redrawAll();
+}
+
+// Met à jour l'état visuel des contrôles seuil
+function updateThrUI(){
+  var grp = document.getElementById('thrInputGroup');
+  var leg = document.getElementById('legThr');
+  var cb  = document.getElementById('thrEnabled');
+  if(cb)  cb.checked = thrEnabled;
+  // Grise les contrôles si seuil désactivé
+  if(grp){
+    grp.style.opacity      = thrEnabled ? '1'   : '.35';
+    grp.style.pointerEvents= thrEnabled ? ''    : 'none';
+  }
+  // Atténue la légende si seuil désactivé
+  if(leg) leg.style.opacity = thrEnabled ? '1' : '.25';
+}
+
+// Applique la nouvelle valeur du seuil
+function applyThr(){
+  var v = parseFloat(document.getElementById('thrInput').value);
+  if(isNaN(v) || v <= 0) return;
+  thrVal = v;
+  redrawAll();
+}
+
+// ============================================================
+// TAILLE DES POINTS
+// ✅ FIX v1.8 : pointRadius doit être un TABLEAU de valeurs
+//    Chart.js v4 ignore la valeur scalaire dans dataset.pointRadius
+//    quand les données changent — seul le tableau est garanti
+// ============================================================
+function updPtSize(v){
+  v = parseFloat(v);
+  ptSize = v;
+  var lbl = document.getElementById('vPtSize');
+  if(lbl) lbl.textContent = (v === 0) ? '0 (off)' : v + ' px';
+  redrawAll();
+}
+
+// ============================================================
+// PLUGIN CHART.JS — LIGNES DE SEUIL
+// Dessiné après le rendu principal via afterDraw
+// ============================================================
+Chart.register({
+  id: 'thrlines',
+  afterDraw: function(chart){
+    var thr = chart.config._thr;
+    if(!thr) return;
+    // Police adaptée au mode (grille compacte vs plein écran)
+    var compact = chart.config._compact;
+    var lblFont = compact ? 'bold 9px Consolas' : 'bold 11px Consolas';
+    var c2 = chart.ctx;
+    var xs = chart.scales.x;
+    var ys = chart.scales.y;
+    if(!xs || !ys) return;
+    var yMax = ys.max || 0;
+    c2.save();
+
+    // Ligne indicative 10M (gris discret) — toujours visible si dans la plage
+    try{
+      var y10 = ys.getPixelForValue(10);
+      if(y10 >= ys.top && y10 <= ys.bottom){
+        c2.strokeStyle = gcs('--thr-gray');
+        c2.lineWidth   = 1;
+        c2.setLineDash([4,4]);
+        c2.globalAlpha = 0.55;
+        c2.beginPath(); c2.moveTo(xs.left,y10); c2.lineTo(xs.right,y10); c2.stroke();
+        c2.setLineDash([]);
+        c2.globalAlpha = 0.6;
+        c2.fillStyle   = gcs('--thr-gray');
+        c2.font        = lblFont;
+        c2.fillText('10M', xs.left+3, y10-3);
+      }
+    }catch(e){}
+
+    // Ligne seuil rouge — uniquement si activée ET dans la plage visible
+    // ✅ v1.9 : l'échelle est désormais calculée pour inclure le seuil
+    //    (mode auto) → thr.alert <= yMax est toujours vrai et la ligne
+    //    apparaît simultanément sur les 4 graphiques.
+    if(thr.enabled && thr.alert > 0 && thr.alert <= yMax){
+      try{
+        var yA = ys.getPixelForValue(thr.alert);
+        if(yA >= ys.top && yA <= ys.bottom){
+          c2.strokeStyle = gcs('--thr-red');
+          c2.lineWidth   = 1.5;
+          c2.setLineDash([5,3]);
+          c2.globalAlpha = 0.85;
+          c2.beginPath(); c2.moveTo(xs.left,yA); c2.lineTo(xs.right,yA); c2.stroke();
+          c2.setLineDash([]);
+          c2.globalAlpha = 1;
+          c2.fillStyle   = gcs('--thr-red');
+          c2.font        = lblFont;
+          c2.fillText(fmb(thr.alert), xs.left+3, yA-3);
+        }
+      }catch(e){}
+    }
+
+    c2.restore();
+  }
+});
+
+// ============================================================
+// CRÉATION D'UN CHART
+// compact=true pour la vue "Tous" (4 graphes en grille 2×2)
+// compact=false pour la vue individuelle (pleine largeur)
+// ============================================================
+function makeChart(cid, compact){
+  var cv = document.getElementById(cid);
+  if(!cv) return null;
+  var ch = new Chart(cv.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'IN',
+          data: [],
+          borderColor:     gcs('--in-c'),
+          backgroundColor: gcs('--in-f'),
+          borderWidth:     compact ? 1 : 1.5,
+          // ✅ Tableau vide — sera rempli à chaque update
+          // Chart.js v4 honore pointRadius comme tableau par point
+          pointRadius:     [],
+          pointHoverRadius:[],
+          fill: true, tension: .2, spanGaps: false
+        },
+        {
+          label: 'OUT',
+          data: [],
+          borderColor:     gcs('--out-c'),
+          backgroundColor: gcs('--out-f'),
+          borderWidth:     compact ? 1 : 1.5,
+          pointRadius:     [],
+          pointHoverRadius:[],
+          fill: true, tension: .2, spanGaps: false
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: function(items){
+            if(!items || !items.length) return '';
+            return ftTip(items[0].parsed.x);
+          },
+          label: function(c){ return c.dataset.label + ': ' + fmb(c.parsed.y); }
+        }}
+      },
+      scales: {
+        x: {
+          // ✅ v1.15 : axe X LINÉAIRE à domaine temporel fixe.
+          //   L'abscisse est le temps réel (timestamp ms) ; le domaine
+          //   [min;max] est imposé par updateChartsForIface. Résultat :
+          //   un historique partiel n'occupe que sa fraction de largeur.
+          type: 'linear',
+          // ✅ v1.16 : axe X divisé en 6 segments ÉGAUX (7 graduations).
+          //   Le pas vaut fenêtre/6 → 10 min (Live 1h), 1 h (6h),
+          //   10 h (2.5j), 60 h (15j). Même logique pour tous les graphes.
+          afterBuildTicks: function(scale){
+            var lo = scale.min, hi = scale.max;
+            if(!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
+            var step = (hi - lo) / 6, arr = [];
+            for(var i = 0; i <= 6; i++){ arr.push({ value: lo + i * step }); }
+            scale.ticks = arr;
+          },
+          ticks: {
+            color: gcs('--tick'),
+            // Affiche les 7 graduations sans en sauter aucune
+            autoSkip: false,
+            // ✅ v1.11 : heures à la même taille que les débits (axe Y)
+            font: { size: compact ? 9 : 12, family: 'Consolas' },
+            maxRotation: 0,
+            // Reformatte le timestamp (ms) selon la vue du graphique
+            callback: function(value){
+              var vw = (this.chart && this.chart.config && this.chart.config._view)
+                       ? this.chart.config._view : 'live';
+              return ft(value, vw);
+            }
+          },
+          grid: { color: gcs('--grid') }
+        },
+        y: {
+          min: 0,
+          ticks: {
+            color: gcs('--tickY'),
+            // ✅ v1.9 : police agrandie pour la lisibilité
+            font: { size: compact ? 9 : 12, family: 'Consolas' },
+            // Moins de graduations : laisse la place aux libellés 2 lignes
+            maxTicksLimit: compact ? 5 : 7,
+            padding: 3,
+            // ✅ v1.9 : libellé multi-lignes (valeur + unité)
+            callback: yTick
+          },
+          grid: { color: gcs('--grid2') }
+        }
+      }
+    }
+  });
+  ch.config._thr     = { alert: thrVal, enabled: thrEnabled };
+  ch.config._compact = compact;
+  return ch;
+}
+
+// ============================================================
+// INITIALISATION DES PANELS HTML
+// Appelée au premier chargement et si les interfaces changent
+// ============================================================
+function initPanels(ifaces){
+  var t1     = document.getElementById('tabs1');
+  var panels = document.getElementById('panels');
+  t1.innerHTML = '';
+  panels.innerHTML = '';
+  charts = {};
+  ifaceOrder = Object.keys(ifaces);
+
+  ifaceOrder.forEach(function(name, idx){
+    var s = sid(name);
+
+    // Création du tab niveau 1
+    var tab = document.createElement('div');
+    tab.className = 't1btn' + (idx === 0 ? ' a' : '');
+    tab.id = 't1_' + s;
+    tab.innerHTML = '<span class="t1dot"></span>' + escH(name);
+    tab.onclick = (function(n){ return function(){ selectIface(n); }; })(name);
+    t1.appendChild(tab);
+
+    // Création du panneau interface
+    var panel = document.createElement('div');
+    panel.className = 'iface-panel' + (idx === 0 ? ' a' : '');
+    panel.id = 'panel_' + s;
+    panel.innerHTML = buildPanelHTML(name, ifaces[name]);
+    panels.appendChild(panel);
+
+    curViews[name] = 'all';
+  });
+
+  if(ifaceOrder.length > 0) curIface = ifaceOrder[0];
+
+  // Initialisation des charts pour chaque interface
+  ifaceOrder.forEach(function(name){ initChartsForIface(name); });
+
+  // Synchronisation des contrôles Options
+  syncYSelect();
+  updateYBadge();
+  updateThrUI();
+  initialized = true;
+}
+
+// ============================================================
+// CONSTRUCTION DU HTML D'UN PANNEAU INTERFACE
+// ============================================================
+function buildPanelHTML(name, info){
+  var s    = sid(name);
+  var link = (info && info.link > 0) ? fmb(info.link) : '?';
+  var desc = (info && info.desc) ? info.desc : '';
+
+  // ── Barre de stats ────────────────────────────────────────
+  var ibar =
+    '<div class="ibar">' +
+    '<div class="si"><span class="sl">&#128246;</span>' +
+    '<span class="sv sn" title="'+escH(desc)+'">'+escH(name)+'</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Lien</span>' +
+    '<span class="sv sn" id="link_'+s+'">'+escH(link)+'</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">&#8595; IN</span>' +
+    '<span class="sv sin" id="curIn_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">&#8593; OUT</span>' +
+    '<span class="sv sout" id="curOut_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Max&#8595;</span>' +
+    '<span class="sv sin" id="maxIn_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Max&#8593;</span>' +
+    '<span class="sv sout" id="maxOut_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Moy&#8595;</span>' +
+    '<span class="sv sin" id="avgIn_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Moy&#8593;</span>' +
+    '<span class="sv sout" id="avgOut_'+s+'">--</span></div>' +
+    '<div class="sp"></div>' +
+    '<div class="si"><span class="sl">Pts</span>' +
+    '<span class="sv sn" id="pts_'+s+'">0</span></div>' +
+    '</div>';
+
+  // ── Tabs niveau 2 (vues temporelles) ─────────────────────
+  var esc = function(n){ return n.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); };
+  var tabs2 =
+    '<div class="tabs2">' +
+    '<div class="t2btn t2all a" id="t2all_'+s+'"' +
+    ' onclick="selectView(\''+s+'\',\'all\',\''+esc(name)+'\')">&#9706; Tous</div>';
+  VIEWS.forEach(function(vk){
+    tabs2 +=
+      '<div class="t2btn" id="t2'+vk+'_'+s+'" title="'+VLT[vk]+'"' +
+      ' onclick="selectView(\''+s+'\',\''+vk+'\',\''+esc(name)+'\')">'+VL[vk]+'</div>';
+  });
+  tabs2 += '</div>';
+
+  // ── Zone graphiques : vue "Tous" (2×2) + vues individuelles ─
+  var gcont = '<div class="gcont"><div class="gall a" id="gall_'+s+'">';
+  VIEWS.forEach(function(vk){
+    gcont +=
+      '<div class="gcell">' +
+      '<div class="gclbl" title="'+VLT[vk]+'"><span>'+VL[vk]+'</span>' +
+      '<span class="gclbl-s" id="cs_'+s+'_'+vk+'"></span></div>' +
+      '<canvas id="c_'+s+'_'+vk+'_all"></canvas></div>';
+  });
+  gcont += '</div>';
+  VIEWS.forEach(function(vk){
+    gcont +=
+      '<div class="gview" id="gv_'+s+'_'+vk+'">' +
+      '<canvas id="c_'+s+'_'+vk+'_single"></canvas></div>';
+  });
+  gcont += '</div>';
+
+  return ibar + tabs2 + gcont;
+}
+
+// ============================================================
+// INITIALISATION DES CHARTS D'UNE INTERFACE
+// 2 charts par vue (all = compact, single = pleine largeur)
+// ============================================================
+function initChartsForIface(name){
+  var s = sid(name);
+  VIEWS.forEach(function(vk){
+    var ca = makeChart('c_'+s+'_'+vk+'_all',    true);
+    var cs = makeChart('c_'+s+'_'+vk+'_single', false);
+    if(ca) charts[s+'_'+vk+'_all']    = ca;
+    if(cs) charts[s+'_'+vk+'_single'] = cs;
+  });
+}
+
+// ============================================================
+// SÉLECTION D'UNE INTERFACE (tab niveau 1)
+// ============================================================
+function selectIface(name){
+  curIface = name;
+  ifaceOrder.forEach(function(n){
+    var s = sid(n);
+    var t = document.getElementById('t1_'+s);
+    var p = document.getElementById('panel_'+s);
+    if(t) t.className = 't1btn' + (n === name ? ' a' : '');
+    if(p) p.className = 'iface-panel' + (n === name ? ' a' : '');
+  });
+}
+
+// ============================================================
+// SÉLECTION D'UNE VUE TEMPORELLE (tab niveau 2)
+// ============================================================
+function selectView(s, vk, name){
+  // Met à jour les classes des tabs niveau 2
+  ['all'].concat(VIEWS).forEach(function(v){
+    var tb = document.getElementById('t2'+v+'_'+s);
+    if(!tb) return;
+    tb.className = 't2btn' + (v==='all'?' t2all':'') + (v===vk?' a':'');
+  });
+  // Affiche/masque les zones graphiques
+  var ga = document.getElementById('gall_'+s);
+  if(ga) ga.className = 'gall' + (vk==='all'?' a':'');
+  VIEWS.forEach(function(v){
+    var gv = document.getElementById('gv_'+s+'_'+v);
+    if(gv) gv.className = 'gview' + (vk===v?' a':'');
+  });
+  curViews[name] = vk;
+  updateChartsForIface(name);
+}
+
+// ============================================================
+// MISE À JOUR DES CHARTS D'UNE INTERFACE
+// Appelée à chaque cycle de 2s et après chaque interaction UI
+// ============================================================
+function updateChartsForIface(name){
+  if(!MD || !MD.ifaces) return;
+  var s = sid(name);
+  var d = MD.ifaces[name];
+  if(!d) return;
+
+  // ── PASSE 1 : calcul des maxima ──────────────────────────
+  // globalMax    = max sur les 4 vues  → échelle COMMUNE de la grille
+  // viewMax[vk]  = max de chaque vue   → échelle propre de la vue plein écran
+  var globalMax = 0;
+  var viewMax   = {};
+  VIEWS.forEach(function(vk){
+    var vd = d[vk];
+    var m  = 0;
+    if(vd && vd.length > 0){
+      vd.forEach(function(pt){
+        var vi = parseFloat(pt.i), vo = parseFloat(pt.o);
+        if(vi > m) m = vi;
+        if(vo > m) m = vo;
+      });
+    }
+    viewMax[vk] = m;
+    if(m > globalMax) globalMax = m;
+  });
+
+  // ✅ v1.9 : le seuil POUSSE l'échelle (mode auto) afin que la ligne
+  //    d'alarme soit toujours visible. La même échelle imposée aux
+  //    4 cellules garantit qu'elle apparaît simultanément partout.
+  var thrPush = (thrEnabled && thrVal > 0) ? thrVal : 0;
+
+  // Échelle COMMUNE des 4 cellules « Tous » → MÊME hauteur en Mbps
+  var gridYMax = calcYMax(Math.max(globalMax, thrPush));
+
+  // ── PASSE 2 : rendu de chaque vue ────────────────────────
+  VIEWS.forEach(function(vk){
+    var vd = d[vk];
+    var inD = [], outD = [];
+    var mxI = 0, mxO = 0;
+
+    // Extraction → points {x:timestamp(ms), y:valeur}
+    // ✅ v1.15 : l'abscisse porte le temps réel (positionnement exact).
+    if(vd && vd.length > 0){
+      vd.forEach(function(pt){
+        var tx = parseFloat(pt.t);
+        var vi = parseFloat(pt.i), vo = parseFloat(pt.o);
+        inD.push({ x: tx, y: vi });
+        outD.push({ x: tx, y: vo });
+        if(vi > mxI) mxI = vi;
+        if(vo > mxO) mxO = vo;
+      });
+    }
+
+    // Échelle de la vue plein écran : son propre maximum + le seuil
+    var singleYMax = calcYMax(Math.max(viewMax[vk], thrPush));
+
+    // Stats mini dans l'entête de la cellule (vue "Tous")
+    var csEl = document.getElementById('cs_'+s+'_'+vk);
+    if(csEl){
+      csEl.textContent = '\u2193'+fmb(mxI)+' \u2191'+fmb(mxO);
+    }
+
+    // ✅ FIX TAILLE DES POINTS (v1.8) :
+    // Chart.js v4 exige un TABLEAU de valeurs par point
+    var n    = inD.length;
+    var pts  = new Array(n);
+    var ptsH = new Array(n);
+    for(var k = 0; k < n; k++){
+      pts[k]  = ptSize;
+      ptsH[k] = ptSize + 2;
+    }
+
+    // Mise à jour des 2 charts (all + single)
+    ['all','single'].forEach(function(sf){
+      var ch = charts[s+'_'+vk+'_'+sf];
+      if(!ch) return;
+      var cp = (sf === 'all');  // compact = vue grille
+
+      // Données ({x,y}) — l'axe X est temporel, pas de labels catégorie
+      ch.data.labels = [];
+
+      ch.data.datasets[0].data            = inD;
+      ch.data.datasets[0].borderColor     = gcs('--in-c');
+      ch.data.datasets[0].backgroundColor = gcs('--in-f');
+      ch.data.datasets[0].borderWidth     = cp ? 1 : 1.5;
+      ch.data.datasets[0].pointRadius      = pts;
+      ch.data.datasets[0].pointHoverRadius = ptsH;
+
+      ch.data.datasets[1].data            = outD;
+      ch.data.datasets[1].borderColor     = gcs('--out-c');
+      ch.data.datasets[1].backgroundColor = gcs('--out-f');
+      ch.data.datasets[1].borderWidth     = cp ? 1 : 1.5;
+      ch.data.datasets[1].pointRadius      = pts;
+      ch.data.datasets[1].pointHoverRadius = ptsH;
+
+      // Options d'affichage (couleurs axes, thème, police lisible)
+      ch.options.scales.x.ticks.color         = gcs('--tick');
+      // ✅ v1.16 : le nombre de graduations est désormais imposé à 6
+      //    segments (7 ticks) par afterBuildTicks dans makeChart() —
+      //    plus de maxTicksLimit variable selon la vue.
+      // ✅ v1.11 : heures à la même taille que les débits (axe Y)
+      ch.options.scales.x.ticks.font.size     = cp ? 9 : 12;
+      ch.options.scales.x.grid.color          = gcs('--grid');
+
+      // ✅ v1.15 : domaine X FIXE = [maintenant − fenêtre ; maintenant]
+      //   → les données occupent leur zone temporelle exacte. Un
+      //   historique partiel laisse la partie gauche vide au lieu d'être
+      //   étiré sur toute la largeur.
+      var winMs = VWIN[vk];
+      var tMax  = Date.now();
+      if(vd && vd.length){
+        var lastT = parseFloat(vd[vd.length-1].t);
+        if(lastT > tMax) tMax = lastT;   // garde-fou si horloge décalée
+      }
+      ch.options.scales.x.min = tMax - winMs;
+      ch.options.scales.x.max = tMax;
+      ch.config._view = vk;   // utilisé par le callback de formatage X
+      ch.options.scales.y.ticks.color         = gcs('--tickY');
+      // ✅ v1.9 : police Y agrandie + moins de graduations
+      ch.options.scales.y.ticks.font.size     = cp ? 9 : 12;
+      ch.options.scales.y.ticks.maxTicksLimit = cp ? 5 : 7;
+      ch.options.scales.y.grid.color          = gcs('--grid2');
+
+      // ✅ v1.9 : échelle Y commune (grille) ou propre (plein écran)
+      ch.options.scales.y.max = cp ? gridYMax : singleYMax;
+
+      // Transmission de l'état seuil + mode compact aux plugins
+      ch.config._thr     = { alert: thrVal, enabled: thrEnabled };
+      ch.config._compact = cp;
+
+      ch.update('none');
+    });
+  });
+}
+
+// ============================================================
+// REDESSINER TOUS LES CHARTS (après changement de thème, etc.)
+// ============================================================
+function redrawAll(){
+  if(!MD || !MD.ifaces) return;
+  ifaceOrder.forEach(function(n){ updateChartsForIface(n); });
+}
+
+// ============================================================
+// MISE À JOUR DE LA BARRE DE STATS (valeurs numériques)
+// ============================================================
+function updateStats(name, d){
+  var s = sid(name);
+  sel('curIn_'+s,  fmb(d.curIn));
+  sel('curOut_'+s, fmb(d.curOut));
+  sel('maxIn_'+s,  fmb(d.maxIn));
+  sel('maxOut_'+s, fmb(d.maxOut));
+  sel('avgIn_'+s,  fmb(d.avgIn));
+  sel('avgOut_'+s, fmb(d.avgOut));
+  sel('pts_'+s,    d.samples || 0);
+  if(d.link > 0) sel('link_'+s, fmb(d.link));
+}
+
+// ============================================================
+// EXPORT SNAPSHOT HTML
+// Génère un HTML autonome avec Chart.js et données embarqués
+// Téléchargé dans le navigateur avec horodatage
+// ============================================================
+function exportSnapshot(){
+  if(!MD) return;
+  var now = new Date();
+  var ts  = now.getFullYear() + '-' +
+            ('0'+(now.getMonth()+1)).slice(-2) + '-' +
+            ('0'+now.getDate()).slice(-2) + '_' +
+            ('0'+now.getHours()).slice(-2) + 'h' +
+            ('0'+now.getMinutes()).slice(-2);
+
+  // Couleurs selon le thème courant
+  var bg     = darkMode ? '#1a1a2e' : '#f0f4f8';
+  var tx     = darkMode ? '#e0e0e0' : '#0f1923';
+  var sf     = darkMode ? '#16213e' : '#ffffff';
+  var bd     = darkMode ? '#0f3460' : '#b0c0d8';
+  var inC    = darkMode ? 'rgba(74,222,128,.9)'  : 'rgba(0,140,80,.9)';
+  var inF    = darkMode ? 'rgba(74,222,128,.12)' : 'rgba(0,180,100,.10)';
+  var outC   = darkMode ? 'rgba(76,201,240,.9)'  : 'rgba(0,99,190,.9)';
+  var outF   = darkMode ? 'rgba(76,201,240,.10)' : 'rgba(0,99,190,.08)';
+  var titleC = darkMode ? '#4cc9f0' : '#0063be';
+
+  // Récupération du code Chart.js embarqué dans la page
+  var chartSrc = '';
+  try{
+    var sc = document.getElementsByTagName('script');
+    for(var i=0; i<sc.length; i++){
+      if(sc[i].innerHTML.length > 50000){ chartSrc = sc[i].innerHTML; break; }
+    }
+  }catch(e){}
+
+  var nowStr = new Date().toLocaleString('fr-FR');
+
+  // Construction du HTML du snapshot
+  var html =
+    '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<title>PS-MRTG Snapshot ' + ts + '</title>' +
+    (chartSrc
+      ? '<script>' + chartSrc + '<\/script>'
+      : '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>'
+    ) +
+    '<style>' +
+    'body{background:'+bg+';color:'+tx+';font-family:Segoe UI,monospace;padding:16px;margin:0}' +
+    'h2{margin-bottom:4px}.sub{color:#778899;font-size:.8em;margin-bottom:14px}' +
+    '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:12px}' +
+    '.card{background:'+sf+';border:1px solid '+bd+';border-radius:8px;padding:12px}' +
+    '.ct{font-size:.9em;font-weight:bold;color:'+titleC+';margin-bottom:6px}' +
+    '.st{display:flex;gap:12px;font-size:.76em;margin-bottom:8px;flex-wrap:wrap}' +
+    '</style></head><body>' +
+    '<h2>&#128247; PS-MRTG Snapshot</h2>' +
+    '<div class="sub">' + nowStr + ' &mdash; ' + escH(MD.dur||'') + '</div>' +
+    '<div class="grid" id="g"></div>' +
+    // Script de rendu des graphiques snapshot
+    '<script>var D=' + JSON.stringify(MD) + ';' +
+    'var ST=[10,100,1000,10000,100000,200000];' +
+    'function fmb(v){v=parseFloat(v);if(isNaN(v)||v<0)return"--";' +
+    'if(v===0)return"0 Kbps";if(v>=1000)return(v/1000).toFixed(2)+" Gbps";' +
+    'if(v>=1)return v.toFixed(2)+" Mbps";return(v*1000).toFixed(0)+" Kbps";}' +
+    'function yt(v){v=parseFloat(v);if(isNaN(v)||v<0)return"";if(v===0)return"0";' +
+    'if(v>=1000){var g=v/1000;return[(g%1===0?String(g):g.toFixed(2).replace(/0+$/,"").replace(/\\.$/,"")),"Gbps"];}' +
+    'if(v>=1)return[(v%1===0?String(v):v.toFixed(1)),"Mbps"];' +
+    'return[String(Math.round(v*1000)),"Kbps"];}' +
+    'function ft(ms){var n=parseInt(ms,10);if(isNaN(n)||n<=0)return"";' +
+    'var d=new Date(n);return("0"+d.getHours()).slice(-2)+":"' +
+    '+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);}' +
+    'window.addEventListener("load",function(){' +
+    'if(!window.Chart||!D)return;' +
+    'var g=document.getElementById("g");' +
+    'Object.keys(D.ifaces).forEach(function(nm){' +
+    'var d=D.ifaces[nm];' +
+    'var card=document.createElement("div");card.className="card";' +
+    'var sn=nm.replace(/[^a-zA-Z0-9]/g,"_");' +
+    'card.innerHTML=' +
+    '"<div class=ct>"+nm+"</div>' +
+    '<div class=st>' +
+    '<span style=\'color:'+inC+'\'>&#8595; "+fmb(d.curIn)+"</span>' +
+    '<span style=\'color:'+outC+'\'>&#8593; "+fmb(d.curOut)+"</span>' +
+    '<span>Max&#8595; "+fmb(d.maxIn)+"</span>' +
+    '<span>Max&#8593; "+fmb(d.maxOut)+"</span>' +
+    '</div><canvas id=\'c_"+sn+"\' height=\'110\'></canvas>";' +
+    'g.appendChild(card);' +
+    'var vd=d.live;if(!vd||!vd.length)return;' +
+    'var lb=[],ins=[],outs=[];' +
+    'vd.forEach(function(p){lb.push(ft(p.t));ins.push(parseFloat(p.i));outs.push(parseFloat(p.o));});' +
+    'var mx=0;ins.forEach(function(v){if(v>mx)mx=v;});outs.forEach(function(v){if(v>mx)mx=v;});' +
+    'var ym=ST[ST.length-1];' +
+    'for(var i=0;i<ST.length;i++){if(mx<=ST[i]){ym=ST[i];break;}}' +
+    'var cv=document.getElementById("c_"+sn);if(!cv)return;' +
+    'new Chart(cv.getContext("2d"),{type:"line",' +
+    'data:{labels:lb,datasets:[' +
+    '{label:"IN",data:ins,borderColor:"'+inC+'",backgroundColor:"'+inF+'",' +
+    'borderWidth:1.5,pointRadius:1,fill:true,tension:.2},' +
+    '{label:"OUT",data:outs,borderColor:"'+outC+'",backgroundColor:"'+outF+'",' +
+    'borderWidth:1.5,pointRadius:1,fill:true,tension:.2}' +
+    ']},' +
+    'options:{responsive:true,maintainAspectRatio:false,animation:false,' +
+    'plugins:{legend:{display:false}},' +
+    'scales:{x:{ticks:{maxTicksLimit:6,font:{size:11}}},' +
+    'y:{min:0,max:ym,ticks:{font:{size:11},maxTicksLimit:6,padding:3,callback:function(v){return yt(v);}}}}}});' +
+    '});});' +
+    '<\/script></body></html>';
+
+  // Téléchargement du snapshot
+  var blob = new Blob([html], {type:'text/html;charset=utf-8'});
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'PSMrtg_Snapshot_' + ts + '.html';
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+}
+
+// ============================================================
+// CHARGEMENT DES DONNÉES (cycle de 2s)
+// Recharge network_data.js qui définit window.MD
+// ============================================================
+function loadData(){
+  // Suppression du script précédent pour forcer le rechargement
+  var old = document.getElementById('_mds');
+  if(old && old.parentNode) old.parentNode.removeChild(old);
+
+  var s = document.createElement('script');
+  s.id  = '_mds';
+  s.src = DJP + '?_=' + Date.now();  // Cache-busting
+
+  s.onload = function(){
+    if(!window.MD) return;
+    MD = window.MD;
+
+    // ✅ INIT UNIQUE depuis PS — jamais écrasé ensuite
+    // thrEnabled, thrVal, yScaleMode : contrôlés par l'UI après init
+    if(!uiInitDone){
+      thrVal     = MD.threshold     || thrVal;
+      thrEnabled = (MD.thresholdEnabled !== undefined)
+                    ? MD.thresholdEnabled : thrEnabled;
+      if(MD.yScaleMode !== undefined) yScaleMode = String(MD.yScaleMode);
+      // Synchronisation des contrôles visuels
+      var cb = document.getElementById('thrEnabled');
+      if(cb) cb.checked = thrEnabled;
+      var ti = document.getElementById('thrInput');
+      if(ti) ti.value = thrVal;
+      syncYSelect();
+      updateYBadge();
+      updateThrUI();
+      uiInitDone = true;
+    }
+
+    // Mise à jour header (heure + durée)
+    sel('durLbl', MD.dur || '--');
+    sel('nowLbl', MD.now || '--:--:--');
+
+    // Reconstruction des panels si les interfaces ont changé
+    var ni = Object.keys(MD.ifaces);
+    if(!initialized ||
+       JSON.stringify(ni.slice().sort()) !==
+       JSON.stringify(ifaceOrder.slice().sort())){
+      initPanels(MD.ifaces);
+    }
+
+    // Mise à jour stats + graphiques pour chaque interface
+    ni.forEach(function(name){
+      if(MD.ifaces[name]){
+        updateStats(name, MD.ifaces[name]);
+        updateChartsForIface(name);
+      }
+    });
+  };
+
+  s.onerror = function(){};
+  document.head.appendChild(s);
+}
+
+// Démarrage : premier chargement puis cycle de 2s
+loadData();
+setInterval(loadData, 2000);
+</script>
+</body>
+</html>
+"@
+    try {
+        $html | Set-Content -Path $htmlFile -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Host "  ERREUR ecriture HTML : $_" -ForegroundColor Red
+    }
+}
+
+# ============================================================
+# SECTION 19 — POINT D'ENTRÉE PRINCIPAL
+# ============================================================
+$script:startMs = Get-NowMs
+
+# Bannière de démarrage
+Write-Host ""
+Write-Host "  Mode : $($ExecutionContext.SessionState.LanguageMode)" -ForegroundColor Cyan
+Write-Host "  =============================================" -ForegroundColor Cyan
+Write-Host "   PS-MRTG v1.16 — MRTG Bandwidth Monitor"                -ForegroundColor White
+Write-Host "   Bande passante reseau — temps reel"          -ForegroundColor Yellow
+Write-Host "   Intervalle : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
+Write-Host "   Echelle Y  : $YScaleMode"                    -ForegroundColor Yellow
+Write-Host "   Threshold  : $ThresholdAlertMbps Mbps (actif:$ThresholdEnabled)" `
+           -ForegroundColor Yellow
+Write-Host "   Rapport    : $htmlFile"                      -ForegroundColor Gray
+Write-Host "   Arret      : Ctrl+C"                         -ForegroundColor Red
+Write-Host "  =============================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ── Détection des interfaces ─────────────────────────────────
+Write-Host "  Detection interfaces actives..." -ForegroundColor Cyan
+$script:ActiveIfaces = Get-ActiveInterfaces
+if ($script:ActiveIfaces.Count -eq 0) {
+    Write-Host "  ATTENTION : Aucune interface detectee !" -ForegroundColor Red
+} else {
+    Write-Host "  $($script:ActiveIfaces.Count) interface(s) detectee(s)." `
+               -ForegroundColor Green
+}
+Write-Host ""
+
+# ── Initialisation des buffers ───────────────────────────────
+foreach ($ifName in $script:ActiveIfaces.Keys) {
+    Init-InterfaceBuffers -Name $ifName
+}
+
+# ── Debug compteurs (affiché une seule fois au démarrage) ────
+Debug-Counters
+
+# ── Initialisation des compteurs bruts (premier sondage) ────
+Write-Host "  Init compteurs..." -ForegroundColor Cyan
+$initCounters = Get-NetworkCounters
+$initMs       = Get-NowMs
+foreach ($ifName in $script:interfaces.Keys) {
+    $info = $script:ActiveIfaces[$ifName]
+    $desc = if ($null -ne $info) { "$($info.Description)" } else { "" }
+    $cKey = Find-CounterKey -IfaceName $ifName -IfaceDesc $desc -Counters $initCounters
+    if ($null -ne $cKey) {
+        $script:rawCounters[$ifName].LastIn  = [long]$initCounters[$cKey].BytesIn
+        $script:rawCounters[$ifName].LastOut = [long]$initCounters[$cKey].BytesOut
+        $script:rawCounters[$ifName].LastTs  = $initMs
+        Write-Host "  Init OK : '$ifName' → '$cKey'" -ForegroundColor Green
+    } else {
+        Write-Host "  Init FAIL : '$ifName' — compteur introuvable" -ForegroundColor Red
+    }
+}
+Write-Host ""
+
+# ── Génération HTML + premier write data.js ──────────────────
+Write-HtmlOnce
+Write-DataJs
+
+# ── Ouverture du navigateur ──────────────────────────────────
+Open-Browser -FilePath $htmlFile
+Write-Host "  Navigateur ouvert." -ForegroundColor Green
+Write-Host "  Ctrl+C pour arreter." -ForegroundColor Gray
+Write-Host ""
+
+# ── Boucle principale ────────────────────────────────────────
+$lastWrite   = Get-Date
+$lastCollect = Get-Date
+
+try {
+    while ($true) {
+        $now = Get-Date
+
+        # Lecture des commandes du browser (threshold, yScale)
+        Read-CmdFile
+
+        # Collecte de la bande passante (toutes les $IntervalSec s)
+        if (($now - $lastCollect).TotalSeconds -ge $IntervalSec) {
+            Collect-Bandwidth
+            $lastCollect = $now
+        }
+
+        # Écriture de network_data.js (toutes les $WriteEvery s)
+        if (($now - $lastWrite).TotalSeconds -ge $WriteEvery) {
+            Write-DataJs
+            $lastWrite = $now
+
+            # Log console : durée + débits courants par interface
+            $elapsed = Get-ElapsedSec
+            $hh = [int]($elapsed / 3600)
+            $mm = [int](($elapsed % 3600) / 60)
+            $ss = $elapsed % 60
+            $parts = @()
+            foreach ($ifName in $script:interfaces.Keys) {
+                $iface  = $script:interfaces[$ifName]
+                $parts += "$ifName  IN:$(Format-Mbps $iface.CurIn)  OUT:$(Format-Mbps $iface.CurOut)"
+            }
+            Write-Host ("  [{0:D2}h{1:D2}m{2:D2}s]  {3}" -f `
+                $hh, $mm, $ss, ($parts -join "   |   ")) -ForegroundColor Cyan
+        }
+
+        # Pause courte pour ne pas saturer le CPU
+        Start-Sleep -Milliseconds 200
+    }
+}
+finally {
+    # Bloc exécuté même sur Ctrl+C
+    Write-Host ""
+    Write-Host "  Arret PS-MRTG..." -ForegroundColor Yellow
+    Write-DataJs   # Dernier flush des données
+    Write-Host "  Rapport final : $htmlFile" -ForegroundColor Gray
+    Write-Host "  Arrete." -ForegroundColor Green
+    Write-Host ""
+}
