@@ -16,6 +16,14 @@ sur 4 échelles de temps (de la dernière heure aux 15 derniers jours).
 
 ---
 
+## 📸 Aperçu
+
+<p align="center">
+  <img src="PS_MRTG_2026-06-02.png" alt="Vue Live plein écran" width="90%">
+</p>
+
+---
+
 ## ✨ Fonctionnalités
 
 - **Temps réel** : rafraîchissement automatique toutes les 2 secondes.
@@ -29,14 +37,6 @@ sur 4 échelles de temps (de la dernière heure aux 15 derniers jours).
 - **Export snapshot** de la vue Live.
 - **100 % offline** : aucune dépendance réseau une fois Chart.js déposé localement.
 - **Compatible ConstrainedLanguage** (environnements verrouillés) — PowerShell 5.1 et 7+.
-
----
-
-## 📸 Aperçu
-
-<p align="center">
-  <img src="PS_MRTG_2026-06-02.png" alt="Vue Live plein écran" width="90%">
-</p>
 
 ---
 
