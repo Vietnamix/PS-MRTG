@@ -217,8 +217,6 @@ Please clearly describe the expected behavior and your test environment (PowerSh
 
 Distributed under the **MIT** license. See the [`LICENSE`](LICENSE) file.
 
-> *To confirm: if you prefer another license (Apache-2.0, GPL-3.0…), adapt this section and add the corresponding `LICENSE` file.*
-
 ---
 
 ## 👤 Author
