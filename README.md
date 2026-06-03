@@ -213,8 +213,6 @@ Merci de décrire clairement le comportement attendu et l'environnement testé (
 
 Distribué sous licence **MIT**. Voir le fichier [`LICENSE`](LICENSE).
 
-> *À confirmer : si vous préférez une autre licence (Apache‑2.0, GPL‑3.0…), adaptez ce paragraphe et ajoutez le fichier `LICENSE` correspondant.*
-
 ---
 
 ## 👤 Auteur
