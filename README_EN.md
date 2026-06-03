@@ -1,4 +1,4 @@
-# PS-MRTG — MRTG Bandwidth Monitor
+# PS-MRTG - MRTG Bandwidth Monitor
 
 > Real-time network bandwidth monitor, **MRTG-style**, written in **PowerShell**.
 > Interactive web interface, 100% offline, no installation and no service.
@@ -30,7 +30,7 @@ time scales (from the last hour to the last 15 days).
 - **Light / dark theme**.
 - **Snapshot export** of the Live view.
 - **100% offline**: no network dependency once Chart.js is placed locally.
-- **ConstrainedLanguage compatible** (locked-down environments) — PowerShell 5.1 and 7+.
+- **ConstrainedLanguage compatible** (locked-down environments) - PowerShell 5.1 and 7+.
 
 ---
 
@@ -60,7 +60,7 @@ Each view keeps 720 points; the "look-back" is the window covered once the buffe
 - **Windows** 10 / 11 or Windows Server.
 - **PowerShell 5.1** (built into Windows) or **PowerShell 7+**.
 - A modern browser: **Microsoft Edge** or **Google Chrome** recommended.
-- **Chart.js 4.4.0** (`chart.umd.min.js`) — see installation below.
+- **Chart.js 4.4.0** (`chart.umd.min.js`) - see installation below.
 
 > Counters are read via `Get-NetAdapterStatistics` (with fallbacks to other methods). Administrator rights are not required in most cases.
 
@@ -110,7 +110,7 @@ The script:
 
 **Stop**: `Ctrl + C` in the PowerShell console.
 
-> **Execution policy** — if the script is blocked, allow it for the current session:
+> **Execution policy** - if the script is blocked, allow it for the current session:
 > ```powershell
 > powershell -ExecutionPolicy Bypass -File .\PS-MRTG_v1.16.ps1
 > ```
@@ -203,13 +203,13 @@ Please clearly describe the expected behavior and your test environment (PowerSh
 
 ## 📝 Changelog (recent excerpts)
 
-- **v1.16** — X axis split into 6 equal segments (10 min in Live, 1 h / 10 h / 60 h depending on the view).
-- **v1.15** — Fixed time-domain X axis: data is shown at its real position.
-- **v1.14** — Look-back (covered period) shown next to each chart.
-- **v1.13 / v1.12** — Dates on the time axis (readability of multi-day views).
-- **v1.11** — Time labels at the same size as the throughput labels.
-- **v1.10** — Finer scale steps (200 / 500 Mbps…), threshold disabled by default.
-- **v1.9** — Shared scale across the 4 views, Y-axis readability, threshold included in the scale.
+- **v1.16** - X axis split into 6 equal segments (10 min in Live, 1 h / 10 h / 60 h depending on the view).
+- **v1.15** - Fixed time-domain X axis: data is shown at its real position.
+- **v1.14** - Look-back (covered period) shown next to each chart.
+- **v1.13 / v1.12** - Dates on the time axis (readability of multi-day views).
+- **v1.11** - Time labels at the same size as the throughput labels.
+- **v1.10** - Finer scale steps (200 / 500 Mbps…), threshold disabled by default.
+- **v1.9** - Shared scale across the 4 views, Y-axis readability, threshold included in the scale.
 
 ---
 
