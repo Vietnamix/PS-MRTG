@@ -1,4 +1,4 @@
-# PS-MRTG — MRTG Bandwidth Monitor
+# PS-MRTG - MRTG Bandwidth Monitor
 
 > Moniteur de bande passante réseau en temps réel, façon **MRTG**, écrit en **PowerShell**.
 > Interface web interactive, 100 % offline, sans installation ni service.
@@ -58,7 +58,7 @@ Chaque vue conserve 720 points ; le « recul » est la fenêtre couverte une foi
 - **Windows** 10 / 11 ou Windows Server.
 - **PowerShell 5.1** (intégré à Windows) ou **PowerShell 7+**.
 - Un navigateur récent : **Microsoft Edge** ou **Google Chrome** recommandés.
-- **Chart.js 4.4.0** (`chart.umd.min.js`) — voir l'installation ci‑dessous.
+- **Chart.js 4.4.0** (`chart.umd.min.js`) - voir l'installation ci‑dessous.
 
 > Les compteurs sont lus via `Get-NetAdapterStatistics` (avec repli sur d'autres méthodes). Aucun droit administrateur n'est requis dans la plupart des cas.
 
