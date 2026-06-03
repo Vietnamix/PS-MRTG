@@ -37,7 +37,7 @@ time scales (from the last hour to the last 15 days).
 ## 📸 Preview
 
 <p align="center">
-  <img src="PS_MRTG_202-06-02.png" alt="PS_NCDU" width="90%">
+  <img src="PS_MRTG_2026-06-02.png" alt="PS_NCDU" width="90%">
 </p>
 
 ---
