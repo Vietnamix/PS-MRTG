@@ -215,7 +215,7 @@ Please clearly describe the expected behavior and your test environment (PowerSh
 
 ## 📄 License
 
-Distributed under the **MIT** license. See the [`LICENSE`](LICENSE) file.
+Distributed under the **MIT** license. See the [`LICENSE.md`](License.md) file.
 
 ---
 
