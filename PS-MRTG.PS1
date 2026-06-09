@@ -1,6 +1,6 @@
 # ============================================================
 # SCRIPT  : PS-MRTG — Network Bandwidth Monitor
-# VERSION : 1.20
+# VERSION : 1.22
 # AUTEUR  : Eric Guiffault
 # DATE    : 2026-05
 #
@@ -9,6 +9,26 @@
 #   Classic MRTG style - 4 aggregated time views.
 #   Interactive HTML interface - 100% offline.
 #   Compatible with strict ConstrainedLanguage (PS 5.1 + PS 7+).
+#
+# CHANGELOG v1.22 :
+#   - FIX auto-stop: the window is now detected via ANY browser process
+#     using our dedicated --user-data-dir profile, instead of the single
+#     spawned PID. Edge/Chrome hand off the launched process to an
+#     existing instance, which made the PID-based watch never fire and
+#     left the hidden PowerShell running forever. Closing the dashboard
+#     window now reliably stops the script.
+#   - Single instance: on startup any previous PS-MRTG instance (and its
+#     orphaned browser) is stopped via a lock file, so two runs no longer
+#     overlap and double the graphs.
+#   - Clean exit: lock released and our browser window closed on stop.
+#   - Requires WMI/CIM (Win32_Process) for the profile-based watch;
+#     falls back to the spawned handle if CIM is unavailable.
+#
+# CHANGELOG v1.21 :
+#   - PowerShell Gallery metadata for discoverability: icon (ICONURI),
+#     expanded TAGS (+ PSEdition_Desktop/Core compatibility badges),
+#     richer keyword-front-loaded DESCRIPTION, ASCII copyright.
+#   - No functional change to monitoring.
 #
 # CHANGELOG v1.20 :
 #   - FIX (regression v1.18): in hidden mode the browser-watch could
@@ -232,6 +252,36 @@ $cmdFile  = "$scriptTemp\mrtg_cmd.js"
 # the window. Unique per run (PID) -> no stale cache reuse.
 $profileDir = "$scriptTemp\browser_profile_$PID"
 Remove-Item -Path "$scriptTemp\browser_profile_*" -Recurse -Force -ErrorAction SilentlyContinue
+
+# --- Single instance (v1.22) --------------------------------------
+# Two overlapping runs would both write network_data.js and the graphs
+# would "double up". On startup we stop any previous PS-MRTG instance
+# (recorded in a lock file) and its orphaned browser, then claim the lock.
+$lockFile = "$scriptTemp\instance.lock"
+if (Test-Path $lockFile) {
+    try {
+        $old        = (Get-Content -Path $lockFile -ErrorAction Stop) -split '\|'
+        $oldPid     = [int]$old[0]
+        $oldProfile = if ($old.Count -gt 1) { $old[1] } else { "" }
+        if ($oldPid -and $oldPid -ne $PID) {
+            $op = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+            if ($op -and ($op.ProcessName -eq 'powershell' -or $op.ProcessName -eq 'pwsh')) {
+                Write-Host "  Stopping previous PS-MRTG instance (PID $oldPid)..." -ForegroundColor Yellow
+                Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+            }
+        }
+        # Kill the previous run's orphaned browser (matched by its profile dir)
+        if ($oldProfile) {
+            try {
+                Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
+                    Where-Object { $_.CommandLine -like "*$oldProfile*" } |
+                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            } catch { }
+        }
+    } catch { }
+}
+# Claim the lock for this instance (PID + our profile dir)
+"$PID|$profileDir" | Set-Content -Path $lockFile -Encoding ASCII -ErrorAction SilentlyContinue
 
 # ============================================================
 # SECTION 3 - GLOBAL SCRIPT VARIABLES
@@ -1080,6 +1130,22 @@ function Open-Browser {
     }
 }
 
+# Returns $true while the dashboard window is open. Primary signal: ANY
+# Edge/Chrome process whose command line uses our dedicated profile dir.
+# This is robust to Chromium's launcher hand-off (where the spawned PID
+# exits immediately even though the real browser window stays open).
+# Fallback (if CIM/WMI is unavailable): the spawned process handle.
+function Test-BrowserOpen {
+    param([string]$ProfileDir)
+    try {
+        $hits = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*$ProfileDir*" }
+        if ($hits) { return $true } else { return $false }
+    } catch {
+        try { return (-not $script:browserProc.HasExited) } catch { return $true }
+    }
+}
+
 # ============================================================
 # SECTION 18 - HTML GENERATION
 # Generates dashboard.html with embedded Chart.js
@@ -1098,7 +1164,7 @@ function Write-HtmlOnce {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>PS-MRTG v1.20 - MRTG Bandwidth Monitor</title>
+<title>PS-MRTG v1.22 - MRTG Bandwidth Monitor</title>
 $chartJsTag
 <style>
 /* -- CSS variables, dark theme (default) ------------------- */
@@ -1306,7 +1372,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
         MRTG Bandwidth Monitor
       </span>
     </h1>
-    <span class="vtag">v1.20</span>
+    <span class="vtag">v1.22</span>
   </div>
   <div class="hr2">
     <!-- Current Y scale mode badge -->
@@ -2374,7 +2440,7 @@ $script:startMs = Get-NowMs
 Write-Host ""
 Write-Host "  Mode : $($ExecutionContext.SessionState.LanguageMode)" -ForegroundColor Cyan
 Write-Host "  =============================================" -ForegroundColor Cyan
-Write-Host "   PS-MRTG v1.20 - MRTG Bandwidth Monitor"                  -ForegroundColor White
+Write-Host "   PS-MRTG v1.22 - MRTG Bandwidth Monitor"                  -ForegroundColor White
 Write-Host "   Network bandwidth - real time"          -ForegroundColor Yellow
 Write-Host "   Interval   : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
 Write-Host "   Y scale  : $YScaleMode"                    -ForegroundColor Yellow
@@ -2444,30 +2510,26 @@ $lastCollect = Get-Date
 $lastAlive   = Get-Date
 $startWatch  = Get-Date
 $AliveEvery  = 5     # seconds between two window checks
-$WatchGrace  = 30    # grace period (s): no auto-stop while the browser settles
-$wasAlive    = $false  # true once the browser process is confirmed running
-$exitStreak  = 0     # consecutive HasExited readings (need 2 to actually stop)
+$WatchGrace  = 12    # grace (s): give the browser time to spawn its process
+$wasAlive    = $false  # true once the dashboard window is confirmed open
+$missStreak  = 0     # consecutive checks with no browser -> closed
 
 try {
     while ($true) {
 
-        # --- Window watch (auto-stop), hardened v1.20 ---
-        # Only stop if the browser process was confirmed ALIVE at least once
-        # (after a grace period) AND has then exited on 2 consecutive checks.
-        # This prevents a launcher hand-off (the spawned process exits
-        # immediately) from killing the hidden PowerShell and freezing the
-        # data. If the process is never seen alive, auto-stop disables itself
-        # and data keeps flowing (close the window or Ctrl+C to stop).
-        if ($script:browserProc -and ((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
+        # --- Window watch (auto-stop), v1.22 ---
+        # Detect the dashboard window via ANY browser process using our
+        # dedicated profile dir (robust to Edge/Chrome launcher hand-off,
+        # which made the old PID-based watch unreliable). Stop once the
+        # window was confirmed open AND then absent on 2 consecutive checks.
+        if (((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
             if (((Get-Date) - $lastAlive).TotalSeconds -ge $AliveEvery) {
                 $lastAlive = Get-Date
-                $exited = $true
-                try { $exited = [bool]$script:browserProc.HasExited } catch { $exited = $true }
-                if (-not $exited) {
-                    $wasAlive = $true; $exitStreak = 0
+                if (Test-BrowserOpen -ProfileDir $profileDir) {
+                    $wasAlive = $true; $missStreak = 0
                 } elseif ($wasAlive) {
-                    $exitStreak++
-                    if ($exitStreak -ge 2) {
+                    $missStreak++
+                    if ($missStreak -ge 2) {
                         Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
                         break
                     }
@@ -2515,6 +2577,14 @@ finally {
     Write-Host "  Stopping PS-MRTG..." -ForegroundColor Yellow
     Write-DataJs   # Final data flush
     Write-Host "  Final report : $htmlFile" -ForegroundColor Gray
+    # Release single-instance lock and close our own browser window if it
+    # is still open (e.g. on Ctrl+C), so nothing is left orphaned.
+    Remove-Item -Path $lockFile -Force -ErrorAction SilentlyContinue
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -like "*$profileDir*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    } catch { }
     Write-Host "  Stopped." -ForegroundColor Green
     Write-Host ""
     Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
