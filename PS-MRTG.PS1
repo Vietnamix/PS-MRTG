@@ -1,128 +1,203 @@
 # ============================================================
 # SCRIPT  : PS-MRTG — Network Bandwidth Monitor
-# VERSION : 1.16
+# VERSION : 1.20
 # AUTEUR  : Eric Guiffault
 # DATE    : 2026-05
 #
 # DESCRIPTION :
-#   Monitoring de bande passante réseau en temps réel.
-#   Style MRTG classique — 4 vues temporelles agrégées.
-#   Interface HTML interactive — 100% offline.
-#   Compatible ConstrainedLanguage strict (PS 5.1 + PS 7+).
+#   Real-time network bandwidth monitoring.
+#   Classic MRTG style - 4 aggregated time views.
+#   Interactive HTML interface - 100% offline.
+#   Compatible with strict ConstrainedLanguage (PS 5.1 + PS 7+).
+#
+# CHANGELOG v1.20 :
+#   - FIX (regression v1.18): in hidden mode the browser-watch could
+#     stop the script within ~5s when the launched browser process
+#     handed off / exited immediately, freezing the data (empty graph).
+#     Auto-stop is now hardened: 30s grace period, only triggers after
+#     the process was confirmed alive AND exited on 2 consecutive checks;
+#     if the process is never seen alive, auto-stop disables itself and
+#     data keeps flowing.
+#   - Diagnostic log (%TEMP%\PSMrtg\PS-MRTG.log) via Start-Transcript:
+#     records everything the (possibly hidden) instance does, so silent
+#     failures are now visible after the fact.
+#
+# CHANGELOG v1.19 :
+#   - All comments, console messages and HTML UI translated to English.
+#     Side effect: no more accented characters -> no encoding/mojibake risk.
+#   - ISE: a "Please wait a few seconds while the monitor window loads..."
+#     message is now shown before the relaunch, so the delay is explicit.
+#
+# CHANGELOG v1.18 :
+#   - Hidden PowerShell window (HideConsole): the script relaunches
+#     in a hidden-window powershell.exe (-Hidden). Only the
+#     browser window stays visible.
+#   - Auto-stop: browser opened in --app mode (dedicated,
+#     monitorable process). On closing the HTML window, the loop
+#     detects HasExited and stops -> no PowerShell window
+#     lingering on the system.
+#   - ISE: hidden relaunch too when HideConsole is active.
+#
+# CHANGELOG v1.17 :
+#   - ISE detection fixed: uses $PSCommandPath first, so the
+#     script also works when run directly or installed from the
+#     PowerShell Gallery (not only when open+saved in the ISE).
+#     ISE fallback kept for a saved (non-Untitled) file.
 #
 # CHANGELOG v1.16 :
-#   - Axe X divisé en 6 segments ÉGAUX (7 graduations) sur tous les
-#     graphes. Pas = fenêtre / 6 : 10 min (Live 1h), 1 h (6h),
-#     10 h (2.5j), 60 h (15j). Graduations régulières et alignées.
+#   - X axis split into 6 EQUAL segments (7 ticks) on all
+#     charts. Step = window / 6: 10 min (Live 1h), 1 h (6h),
+#     10 h (2.5d), 60 h (15d). Regular, aligned ticks.
 #
 # CHANGELOG v1.15 :
-#   - Axe X temporel à domaine FIXE : les données s'affichent à leur
-#     position réelle. Un historique partiel n'occupe que sa fraction
-#     de largeur (ex. 1 jour de données sur la vue 15j = 1/15 du graphe)
-#     au lieu d'être étiré sur toute la largeur.
-#   - Tooltip : date + heure complètes (JJ/MM HH:MM:SS).
+#   - Time X axis with FIXED domain: data is drawn at its
+#     real position. A partial history only occupies its fraction
+#     of width (e.g. 1 day of data on the 15d view = 1/15 of the chart)
+#     instead of being stretched across the whole width.
+#   - Tooltip: full date + time (DD/MM HH:MM:SS).
 #
 # CHANGELOG v1.14 :
-#   - Chaque graphique indique sa PÉRIODE (recul) à côté de son type :
+#   - Each chart shows its PERIOD (look-back) next to its type:
 #     Live (5s) · 1h / 6h (30s) / 2.5j (5min) / 15j (30min).
-#   - Correction : la vue « Récent » couvre 6h (et non 1h comme affiché).
-#   - Infobulle au survol : explication complète du recul de chaque vue.
+#   - Fix: the "Recent" view covers 6h (not 1h as displayed).
+#   - Hover tooltip: full explanation of each view's look-back.
 #
 # CHANGELOG v1.13 :
-#   - Axe X (vues multi-jours) : date + heure sur UNE SEULE ligne
-#     au format « JJ/MM HH:MM ». Graduations espacées → pas de
+#   - X axis (multi-day views): date + time on a SINGLE line
+#     in "DD/MM HH:MM" format. Spaced ticks -> no
 #     chevauchement.
 #
 # CHANGELOG v1.12 :
-#   - Axe X : les vues multi-jours (2.5j / 15j) affichent la DATE (JJ/MM)
-#     sur une 2e ligne sous l'heure → date + heure visibles sans
-#     chevauchement. Graduations espacées pour une lisibilité maximale.
+#   - X axis: multi-day views (2.5d / 15d) show the DATE (DD/MM)
+#     on a 2nd line below the time -> date + time visible without
+#     overlap. Spaced ticks for maximum readability.
 #
 # CHANGELOG v1.11 :
-#   - Axe X (heures) agrandi à la même taille que l'axe Y (débits)
-#     → libellés temporels nettement plus lisibles.
+#   - X axis (hours) enlarged to the same size as the Y axis (rates)
+#     -> time labels much more readable.
 #
 # CHANGELOG v1.10 :
-#   - Échelle Y : paliers automatiques plus fins (progression 1-2-5),
-#     notamment 200 et 500 Mbps, pour éviter les sauts 100M → 1G.
-#   - Mêmes paliers proposés en échelle fixe (menu déroulant).
-#   - L'échelle s'ajuste toujours en fonction du seuil d'alarme (auto).
-#   - Seuil d'alarme DÉSACTIVÉ par défaut (activable à la demande).
+#   - Y scale: finer automatic steps (1-2-5 progression),
+#     notably 200 and 500 Mbps, to avoid 100M -> 1G jumps.
+#   - Same steps offered in fixed scale (dropdown).
+#   - The scale always adjusts to the alarm threshold (auto).
+#   - Alarm threshold DISABLED by default (enable on demand).
 #
 # CHANGELOG v1.9 :
-#   - Vue « Tous » : les 4 graphiques partagent désormais la MÊME
-#     échelle Y (même hauteur en Mbps) → comparaison fiable.
-#   - Le seuil d'alarme POUSSE l'échelle (mode auto) : la ligne rouge
-#     est toujours visible et apparaît simultanément sur les 4 graphes.
-#   - Axe Y plus lisible : police agrandie + unité (Kbps/Mbps/Gbps)
-#     affichée sur une 2e ligne sous la valeur.
-#   - La vue plein écran conserve son échelle propre (lecture fine),
-#     mais inclut elle aussi le seuil pour qu'il reste visible.
+#   - "All" view: the 4 charts now share the SAME
+#     Y scale (same height in Mbps) -> reliable comparison.
+#   - The alarm threshold PUSHES the scale (auto mode): the red line
+#     is always visible and appears simultaneously on all 4 charts.
+#   - More readable Y axis: larger font + unit (Kbps/Mbps/Gbps)
+#     shown on a 2nd line below the value.
+#   - The full-screen view keeps its own scale (fine reading),
+#     but also includes the threshold so it stays visible.
 #
 # ARCHITECTURE :
-#   PS collecte les compteurs réseau toutes les 5s
-#   PS écrit network_data.js toutes les 2s
-#   Le navigateur recharge network_data.js toutes les 2s
-#   Chart.js affiche les graphiques IN/OUT
+#   PS collects network counters every 5s
+#   PS writes network_data.js every 2s
+#   The browser reloads network_data.js every 2s
+#   Chart.js draws the IN/OUT charts
 #
-# VUES TEMPORELLES (recul = fenêtre couverte, buffer plein = 720 points) :
-#   Live  : 1 pt / 5s    → 720 × 5s    = 3 600 s   = 1 h
-#   Hour  : 1 pt / 30s   → 720 × 30s   = 21 600 s  = 6 h   (moy. 6 pts bruts)
-#   Day   : 1 pt / 5min  → 720 × 5min  = 3 600 min = 60 h = 2,5 j (moy. 60 pts)
-#   Week  : 1 pt / 30min → 720 × 30min = 21 600 min = 360 h = 15 j (moy. 360 pts)
+# TIME VIEWS (look-back = covered window, full buffer = 720 points):
+#   Live  : 1 pt / 5s    -> 720 x 5s    = 3 600 s   = 1 h
+#   Hour  : 1 pt / 30s   -> 720 x 30s   = 21 600 s  = 6 h   (avg. 6 raw pts)
+#   Day   : 1 pt / 5min  -> 720 x 5min  = 3 600 min = 60 h = 2.5 d (avg. 60 pts)
+#   Week  : 1 pt / 30min -> 720 x 30min = 21 600 min = 360 h = 15 d (avg. 360 pts)
 #
 # INSTALLATION OFFLINE — Chart.js :
-#   Télécharger : chart.js@4.4.0/dist/chart.umd.min.js
-#   Copier dans : %USERPROFILE%\Documents\chartjs.min.js
-#             ou : %TEMP%\PSMrtg\chartjs.min.js
+#   Download: chart.js@4.4.0/dist/chart.umd.min.js
+#   Copy to: %USERPROFILE%\Documents\chartjs.min.js
+#             or: %TEMP%\PSMrtg\chartjs.min.js
 #
-# NAVIGATEUR : Edge ou Chrome recommandés
+# BROWSER: Edge or Chrome recommended
 # ============================================================
 
-# ── Détection ISE : relance dans powershell.exe ─────────────
+param([switch]$Hidden)
+
+# ============================================================
+# --- Hidden console (no PowerShell window) - v1.18+ ---
+# ============================================================
+# $true  : the script relaunches itself in a HIDDEN PowerShell; only the
+#          browser window stays visible. When it is closed, the
+#          main loop detects the end of the browser process and
+#          stops - no PowerShell window is left lingering on the system.
+# $false : keeps the console (useful for diagnostics).
+# Without a console, Ctrl+C is no longer possible: auto-stop on closing
+# the HTML window takes over.
+$HideConsole = $true
+
+# Hidden relaunch (outside ISE): if requested and we are not already
+# the hidden instance, relaunch in a hidden-window powershell.exe,
+# then exit the visible instance. The -Hidden switch prevents any
+# relaunch loop.
+if ($HideConsole -and -not $Hidden -and $Host.Name -ne "Windows PowerShell ISE Host") {
+    $self = $PSCommandPath
+    if ($self -and (Test-Path -Path $self -PathType Leaf)) {
+        Start-Process -FilePath "powershell.exe" `
+                      -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$self`"","-Hidden" `
+                      -WindowStyle Hidden
+        return
+    }
+    # Path not found (e.g. code pasted in console): continue visible.
+}
+
+# -- ISE detection: relaunch in powershell.exe ---------------
+# The ISE handles continuous monitoring poorly: switch to powershell.exe,
+# hidden if $HideConsole else visible. Reliable path via $PSCommandPath
+# (also set when the script is installed from the PowerShell Gallery).
 if ($Host.Name -eq "Windows PowerShell ISE Host") {
-    $scriptPath = $null
-    if ($psISE -and $psISE.CurrentFile) {
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath -and $psISE -and $psISE.CurrentFile -and -not $psISE.CurrentFile.IsUntitled) {
         $scriptPath = $psISE.CurrentFile.FullPath
     }
     if ($scriptPath -and (Test-Path -Path $scriptPath -PathType Leaf)) {
-        Write-Host "  ISE detecte — Lancement dans powershell.exe..." -ForegroundColor Cyan
-        Start-Process -FilePath "powershell.exe" `
-                      -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass",
-                                    "-NoExit","-File","`"$scriptPath`"" `
-                      -WindowStyle Normal
+        if ($HideConsole) {
+            Write-Host "  ISE detected - launching in a hidden powershell.exe..." -ForegroundColor Cyan
+            Write-Host "  Please wait a few seconds while the monitor window loads..." -ForegroundColor Yellow
+            Start-Process -FilePath "powershell.exe" `
+                          -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$scriptPath`"","-Hidden" `
+                          -WindowStyle Hidden
+        } else {
+            Write-Host "  ISE detected - launching in powershell.exe..." -ForegroundColor Cyan
+            Write-Host "  Please wait a few seconds while the monitor window loads..." -ForegroundColor Yellow
+            Start-Process -FilePath "powershell.exe" `
+                          -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass",
+                                        "-NoExit","-File","`"$scriptPath`"" `
+                          -WindowStyle Normal
+        }
     } else {
-        Write-Host "  Sauvegardez le script (Ctrl+S) puis relancez." -ForegroundColor Red
+        Write-Host "  Save the script (Ctrl+S) then relaunch." -ForegroundColor Red
     }
     return
 }
 
 # ============================================================
 # SECTION 1 — CONFIGURATION UTILISATEUR
-# Tous les paramètres modifiables sont ici
+# All editable settings are here
 # ============================================================
 
-# Valeur du seuil alarme en Mbps (ligne rouge sur le graphique)
-# Valeur pré-remplie, utilisée quand le seuil est activé.
+# Alarm threshold value in Mbps (red line on the chart)
+# Pre-filled value, used when the threshold is enabled.
 $ThresholdAlertMbps = 150
 
-# Seuil activé au démarrage : $true = visible, $false = masqué
-# ✅ v1.10 : désactivé par défaut (l'utilisateur l'active à la demande)
+# Threshold enabled at startup: $true = visible, $false = hidden
+# v1.10 : disabled by default (the user enables it on demand)
 $ThresholdEnabled   = $false
 
 # Echelle Y :
 #   "auto"  = paliers automatiques (progression fine 1-2-5 :
-#             …100M → 200M → 500M → 1G → 2G → 5G → 10G…)
-#   nombre  = valeur fixe en Mbps (ex: 1000 pour figer à 1 Gbps)
+#             ...100M -> 200M -> 500M -> 1G -> 2G -> 5G -> 10G...)
+#   number  = fixed value in Mbps (e.g. 1000 to lock at 1 Gbps)
 $YScaleMode = "auto"
 
-# Nombre maximum de points conservés par vue temporelle
+# Maximum number of points kept per time view
 $MaxPoints   = 720
 
-# Intervalle de collecte des compteurs réseau (secondes)
+# Network counter collection interval (seconds)
 $IntervalSec = 5
 
-# Fréquence d'écriture du fichier network_data.js (secondes)
+# network_data.js write frequency (seconds)
 $WriteEvery  = 2
 
 # ============================================================
@@ -135,36 +210,50 @@ if (-not (Test-Path $scriptTemp)) {
     New-Item -ItemType Directory -Path $scriptTemp -Force | Out-Null
 }
 
-# Fichier HTML du dashboard (ouvert dans le navigateur)
+# --- Diagnostic log (essential in hidden mode) ----------------- v1.20
+# In hidden mode there is no visible console, so a silent failure looks
+# like "nothing happens". This transcript records everything the working
+# instance does (interface detection, browser launch, per-2s bandwidth
+# log, and any error or auto-stop) into a file you can open afterwards:
+#   %TEMP%\PSMrtg\PS-MRTG.log
+Start-Transcript -Path "$scriptTemp\PS-MRTG.log" -Force -ErrorAction SilentlyContinue | Out-Null
+
+# Dashboard HTML file (opened in the browser)
 $htmlFile = "$scriptTemp\dashboard.html"
 
-# Fichier JS de données (rechargé toutes les 2s par le browser)
+# JS data file (reloaded every 2s by the browser)
 $dataFile = "$scriptTemp\network_data.js"
 
-# Fichier de commandes browser → PS (threshold, yScale, etc.)
+# Browser -> PS command file (threshold, yScale, etc.)
 $cmdFile  = "$scriptTemp\mrtg_cmd.js"
 
+# Dedicated browser profile (--app mode): isolates the Edge/Chrome instance and
+# creates a CLEAN, monitorable process, for auto-stop on closing
+# the window. Unique per run (PID) -> no stale cache reuse.
+$profileDir = "$scriptTemp\browser_profile_$PID"
+Remove-Item -Path "$scriptTemp\browser_profile_*" -Recurse -Force -ErrorAction SilentlyContinue
+
 # ============================================================
-# SECTION 3 — VARIABLES GLOBALES DU SCRIPT
+# SECTION 3 - GLOBAL SCRIPT VARIABLES
 # ============================================================
 
-$script:startTime        = Get-Date           # Heure de démarrage
+$script:startTime        = Get-Date           # Start time
 $script:ThresholdAlert   = $ThresholdAlertMbps
 $script:ThresholdEnabled = $ThresholdEnabled
 $script:YScaleMode       = $YScaleMode
 
-# Hashtable des buffers de données par interface
-# Clé = nom interface, Valeur = @{LiveTs; LiveIn; LiveOut; ...}
+# Hashtable of data buffers per interface
+# Key = interface name, Value = @{LiveTs; LiveIn; LiveOut; ...}
 $script:interfaces   = @{}
 
-# Hashtable des derniers compteurs bruts par interface
-# Clé = nom interface, Valeur = @{LastIn; LastOut; LastTs}
+# Hashtable of the last raw counters per interface
+# Key = interface name, Value = @{LastIn; LastOut; LastTs}
 $script:rawCounters  = @{}
 
-# Hashtable des métadonnées d'interface (description, vitesse, etc.)
+# Hashtable of interface metadata (description, speed, etc.)
 $script:ActiveIfaces = @{}
 
-# Flag pour éviter les messages d'avertissement répétitifs
+# Flag to avoid repeated warning messages
 $script:debugDone    = $false
 
 # ============================================================
@@ -172,35 +261,35 @@ $script:debugDone    = $false
 # Compatible ConstrainedLanguage strict (pas de [math]::)
 # ============================================================
 
-# Retourne le timestamp Unix en millisecondes (entier long)
+# Returns the Unix timestamp in milliseconds (long integer)
 function Get-NowMs {
     $epoch = [datetime]"1970-01-01 00:00:00"
     $span  = (Get-Date).ToUniversalTime() - $epoch
     return [long]$span.TotalMilliseconds
 }
 
-# Retourne le nombre de secondes écoulées depuis le démarrage
+# Returns the number of seconds elapsed since start
 function Get-ElapsedSec {
     return [int]((Get-Date) - $script:startTime).TotalSeconds
 }
 
-# Arrondit un double à $dec décimales
-# ⚠️ CRITIQUE : n'utilise PAS .ToString("Fx") — la locale FR
-#    produit "0,496" au lieu de "0.496" → conversion [double] = 496 !
-#    Solution : calcul arithmétique pur, immune à la locale
+# Rounds a double to $dec decimals
+# CRITICAL: do NOT use .ToString("Fx") - the FR locale
+#    produces "0,496" instead of "0.496" -> conversion [double] = 496 !
+#    Solution: pure arithmetic, locale-immune
 function Round-Double {
     param([double]$n, [int]$dec)
     if ($dec -le 0) { return [double]([int]$n) }
-    # Calcul du facteur 10^dec sans [math]::Pow (interdit en CL)
+    # Compute the 10^dec factor without [math]::Pow (forbidden in CL)
     $f = [double]1
     $m = $dec
     while ($m -gt 0) { $f = $f * 10.0; $m-- }
-    # Arrondi entier puis redivision → résultat propre
+    # Integer rounding then re-division -> clean result
     $rounded = [int]($n * $f + 0.5)
     return [double]$rounded / $f
 }
 
-# Formate une valeur Mbps en string lisible (Kbps / Mbps / Gbps)
+# Formats an Mbps value into a readable string (Kbps / Mbps / Gbps)
 function Format-Mbps {
     param([double]$mbps)
     if ($mbps -ge 1000) { return "$(Round-Double ($mbps/1000) 2) Gbps" }
@@ -208,33 +297,33 @@ function Format-Mbps {
     return "$([int]($mbps * 1000)) Kbps"
 }
 
-# Convertit un double en string JSON avec point décimal explicite
-# ⚠️ CRITIQUE : évite que PowerShell produise "0,496" (locale FR)
-#    dans le fichier .js ce qui casserait le JSON côté browser
+# Converts a double to a JSON string with explicit decimal point
+# CRITICAL: prevents PowerShell from producing "0,496" (FR locale)
+#    in the .js file, which would break the JSON on the browser side
 function Double-ToJs {
     param([double]$v)
     $intPart  = [int]$v
     $fracPart = $v - [int]$v
     if ($fracPart -lt 0) { $fracPart = -$fracPart }
-    # 6 décimales suffisent pour des valeurs en Mbps
+    # 6 decimals are enough for values in Mbps
     $fracInt = [int]($fracPart * 1000000 + 0.5)
     $fracStr = "$fracInt"
-    # Zero-padding à 6 digits
+    # Zero-padding to 6 digits
     while ($fracStr.Length -lt 6) { $fracStr = "0$fracStr" }
-    # Suppression des zéros trailing
+    # Strip trailing zeros
     $fracStr = $fracStr.TrimEnd('0')
     if ($fracStr.Length -eq 0) { return "$intPart" }
     return "$intPart.$fracStr"
 }
 
 # ============================================================
-# SECTION 5 — DÉTECTION DE LA VITESSE DE LIAISON
-# 3 méthodes en cascade pour maximiser la compatibilité
+# SECTION 5 - LINK SPEED DETECTION
+# 3 cascading methods to maximize compatibility
 # ============================================================
 function Get-LinkSpeed {
     param([string]$IfaceName)
 
-    # Méthode 1 : WMI Win32_NetworkAdapter (fiable sur PS 5.1)
+    # Method 1: WMI Win32_NetworkAdapter (reliable on PS 5.1)
     try {
         $wql = "NetConnectionID='$($IfaceName -replace "'","''")'"
         $w   = Get-WmiObject -Class Win32_NetworkAdapter -Filter $wql -ErrorAction Stop
@@ -245,14 +334,14 @@ function Get-LinkSpeed {
         }
     } catch {}
 
-    # Méthode 2 : Get-NetAdapter (peut échouer en ConstrainedLanguage)
+    # Method 2: Get-NetAdapter (may fail under ConstrainedLanguage)
     try {
         foreach ($a in (Get-NetAdapter -ErrorAction Stop)) {
             if ($a.Name -eq $IfaceName) {
                 $spd = [long]0
                 try { $spd = [long]$a.LinkSpeed } catch {}
                 if ($spd -gt 0) { return $spd }
-                # Certains drivers exposent la vitesse en string "1 Gbps"
+                # Some drivers expose the speed as a string "1 Gbps"
                 try {
                     $ls = "$($a.LinkSpeed)"
                     if ($ls -match '(\d+)') {
@@ -268,12 +357,12 @@ function Get-LinkSpeed {
 }
 
 # ============================================================
-# SECTION 6 — DÉTECTION DES INTERFACES RÉSEAU ACTIVES
+# SECTION 6 - ACTIVE NETWORK INTERFACE DETECTION
 # ============================================================
 function Get-ActiveInterfaces {
     $result = @{}
 
-    # Méthode 1 : Get-NetAdapter (interfaces avec Status=Up)
+    # Method 1: Get-NetAdapter (interfaces with Status=Up)
     try {
         foreach ($a in (Get-NetAdapter -ErrorAction Stop)) {
             if ("$($a.Status)" -ne "Up") { continue }
@@ -302,7 +391,7 @@ function Get-ActiveInterfaces {
         Write-Host "  Get-NetAdapter echec : $_" -ForegroundColor Yellow
     }
 
-    # Méthode 2 fallback : WMI Win32_NetworkAdapter
+    # Method 2 fallback: WMI Win32_NetworkAdapter
     if ($result.Count -eq 0) {
         Write-Host "  Fallback WMI Win32_NetworkAdapter..." -ForegroundColor Yellow
         try {
@@ -335,13 +424,13 @@ function Get-ActiveInterfaces {
 }
 
 # ============================================================
-# SECTION 7 — LECTURE DES COMPTEURS RÉSEAU
-# 3 méthodes en cascade pour maximiser la compatibilité
+# SECTION 7 - READING NETWORK COUNTERS
+# 3 cascading methods to maximize compatibility
 # ============================================================
 function Get-NetworkCounters {
     $result = @{}
 
-    # Méthode 1 : Get-NetAdapterStatistics (la plus fiable, PS 4+)
+    # Method 1: Get-NetAdapterStatistics (most reliable, PS 4+)
     try {
         $ok = $false
         foreach ($s in (Get-NetAdapterStatistics -ErrorAction Stop)) {
@@ -358,7 +447,7 @@ function Get-NetworkCounters {
         Write-Host "  Get-NetAdapterStatistics echec : $_" -ForegroundColor Yellow
     }
 
-    # Méthode 2 : WMI Win32_PerfRawData_Tcpip_NetworkInterface
+    # Method 2: WMI Win32_PerfRawData_Tcpip_NetworkInterface
     try {
         $ok = $false
         foreach ($p in (Get-WmiObject -Class Win32_PerfRawData_Tcpip_NetworkInterface `
@@ -376,7 +465,7 @@ function Get-NetworkCounters {
         Write-Host "  WMI PerfRawData echec : $_" -ForegroundColor Yellow
     }
 
-    # Méthode 3 : Get-Counter (EN uniquement pour la compatibilité)
+    # Method 3: Get-Counter (EN only for compatibility)
     try {
         $sIn  = Get-Counter -Counter "\Network Interface(*)\Bytes Received/sec" `
                 -ErrorAction Stop
@@ -399,21 +488,21 @@ function Get-NetworkCounters {
         if ($result.Count -gt 0) { return $result }
     } catch {}
 
-    Write-Host "  WARN : Aucune methode compteur disponible !" -ForegroundColor Red
+    Write-Host "  WARN : No counter method available !" -ForegroundColor Red
     return $result
 }
 
 # ============================================================
-# SECTION 8 — MATCHING NOM INTERFACE ↔ CLÉ COMPTEUR
-# Le nom de l'interface (Get-NetAdapter) peut différer du nom
-# du compteur (WMI encode différemment les espaces et #)
-# 5 stratégies en cascade
+# SECTION 8 - MATCH INTERFACE NAME <-> COUNTER KEY
+# The interface name (Get-NetAdapter) may differ from the
+# counter name (WMI encodes spaces and # differently)
+# 5 cascading strategies
 # ============================================================
 function Find-CounterKey {
     param(
         [string]$IfaceName,   # Nom Get-NetAdapter (ex: "Wi-Fi")
         [string]$IfaceDesc,   # Description (ex: "Intel Wi-Fi 6E")
-        [hashtable]$Counters  # Résultat de Get-NetworkCounters
+        [hashtable]$Counters  # Result of Get-NetworkCounters
     )
     if ($Counters.Count -eq 0) { return $null }
 
@@ -422,7 +511,7 @@ function Find-CounterKey {
         if ($k -eq $IfaceName) { return $k }
     }
 
-    # S2 : insensible à la casse
+    # S2: case-insensitive
     $nLow = $IfaceName.ToLower()
     foreach ($k in $Counters.Keys) {
         if ($k.ToLower() -eq $nLow) { return $k }
@@ -435,13 +524,13 @@ function Find-CounterKey {
         if ($nLow.Contains($kl) -and $kl.Length -gt 3)   { return $k }
     }
 
-    # S4 : encodage WMI (espaces → _, # → _, caractères spéciaux → _)
+    # S4: WMI encoding (spaces -> _, # -> _, special chars -> _)
     $wmiEnc = $IfaceName.ToLower() -replace '[^a-z0-9]','_'
     foreach ($k in $Counters.Keys) {
         if (($k.ToLower() -replace '[^a-z0-9]','_') -eq $wmiEnc) { return $k }
     }
 
-    # S5 : match sur les 8 premiers caractères alphanum de la description
+    # S5: match on the first 8 alphanumeric chars of the description
     if (-not [string]::IsNullOrEmpty($IfaceDesc)) {
         $dClean = $IfaceDesc.ToLower() -replace '[^a-z0-9]',''
         $dShort = if ($dClean.Length -gt 8) { $dClean.Substring(0,8) } else { $dClean }
@@ -451,7 +540,7 @@ function Find-CounterKey {
         }
     }
 
-    # S6 : si une seule interface active et un seul compteur non-loopback
+    # S6: if only one active interface and a single non-loopback counter
     $real = @()
     foreach ($k in $Counters.Keys) {
         if ($k.ToLower() -notmatch 'loopback|isatap|teredo|6to4') { $real += $k }
@@ -462,15 +551,15 @@ function Find-CounterKey {
 }
 
 # ============================================================
-# SECTION 9 — DEBUG AU DÉMARRAGE
-# Affiche les compteurs disponibles et le résultat du matching
+# SECTION 9 - STARTUP DEBUG
+# Shows available counters and the matching result
 # ============================================================
 function Debug-Counters {
     Write-Host ""
-    Write-Host "  === DEBUG COMPTEURS ===" -ForegroundColor Yellow
+    Write-Host "  === COUNTER DEBUG ===" -ForegroundColor Yellow
     $counters = Get-NetworkCounters
     if ($counters.Count -eq 0) {
-        Write-Host "  AUCUN compteur disponible !" -ForegroundColor Red
+        Write-Host "  NO counter available !" -ForegroundColor Red
     } else {
         $meth = ""; foreach ($v in $counters.Values) { $meth = $v.Method; break }
         Write-Host "  Methode : $meth | $($counters.Count) entrees" -ForegroundColor Cyan
@@ -480,15 +569,15 @@ function Debug-Counters {
         }
     }
     Write-Host ""
-    Write-Host "  Matching interfaces :" -ForegroundColor Cyan
+    Write-Host "  Interface matching :" -ForegroundColor Cyan
     foreach ($ifName in $script:interfaces.Keys) {
         $info = $script:ActiveIfaces[$ifName]
         $desc = if ($null -ne $info) { $info.Description } else { "" }
         $cKey = Find-CounterKey -IfaceName $ifName -IfaceDesc $desc -Counters $counters
         if ($null -ne $cKey) {
-            Write-Host "    [OK]   '$ifName'  →  '$cKey'" -ForegroundColor Green
+            Write-Host "    [OK]   '$ifName'  ->  '$cKey'" -ForegroundColor Green
         } else {
-            Write-Host "    [FAIL] '$ifName'  →  INTROUVABLE" -ForegroundColor Red
+            Write-Host "    [FAIL] '$ifName'  ->  NOT FOUND" -ForegroundColor Red
         }
     }
     Write-Host "  ========================" -ForegroundColor Yellow
@@ -496,60 +585,60 @@ function Debug-Counters {
 }
 
 # ============================================================
-# SECTION 10 — INITIALISATION DES BUFFERS PAR INTERFACE
-# Chaque interface dispose de 4 vues (Live/Hour/Day/Week)
+# SECTION 10 - PER-INTERFACE BUFFER INITIALIZATION
+# Each interface has 4 views (Live/Hour/Day/Week)
 # + accumulateurs de consolidation
 # ============================================================
 function Init-InterfaceBuffers {
     param([string]$Name)
 
     $script:interfaces[$Name] = @{
-        # ── Vue LIVE (1 pt / 5s, max 720 pts = 1h) ──────────
+        # -- LIVE view (1 pt / 5s, max 720 pts = 1h) ----------
         LiveTs    = @()       # Timestamps Unix ms
-        LiveIn    = @()       # Débit IN en Mbps
-        LiveOut   = @()       # Débit OUT en Mbps
+        LiveIn    = @()       # IN rate in Mbps
+        LiveOut   = @()       # OUT rate in Mbps
         LiveCount = [int]0
 
-        # ── Vue HOUR (1 pt / 30s, max 720 pts = 6h) ─────────
+        # -- HOUR view (1 pt / 30s, max 720 pts = 6h) ---------
         HourTs    = @(); HourIn    = @(); HourOut   = @(); HourCount  = [int]0
 
-        # ── Vue DAY (1 pt / 5min, max 720 pts = 2.5j) ───────
+        # -- DAY view (1 pt / 5min, max 720 pts = 2.5d) -------
         DayTs     = @(); DayIn     = @(); DayOut    = @(); DayCount   = [int]0
 
-        # ── Vue WEEK (1 pt / 30min, max 720 pts = 15j) ──────
+        # -- WEEK view (1 pt / 30min, max 720 pts = 15d) ------
         WeekTs    = @(); WeekIn    = @(); WeekOut   = @(); WeekCount  = [int]0
 
-        # ── Statistiques globales ────────────────────────────
-        MaxIn     = [double]0   # Maximum IN depuis démarrage
+        # -- Global statistics --------------------------------
+        MaxIn     = [double]0   # Maximum IN since start
         MaxOut    = [double]0   # Maximum OUT
-        SumIn     = [double]0   # Somme pour calcul moyenne
+        SumIn     = [double]0   # Sum for average calculation
         SumOut    = [double]0
-        CurIn     = [double]0   # Valeur courante (dernière mesure)
+        CurIn     = [double]0   # Current value (last measurement)
         CurOut    = [double]0
-        Samples   = [int]0      # Nombre total de mesures
+        Samples   = [int]0      # Total number of measurements
 
-        # ── Accumulateurs consolidation HOUR (6 × 5s = 30s) ─
+        # -- HOUR consolidation accumulators (6 x 5s = 30s) --
         Acc30In   = [double]0; Acc30Out  = [double]0; Acc30N  = [int]0
 
-        # ── Accumulateurs consolidation DAY (60 × 5s = 5min) ─
+        # -- DAY consolidation accumulators (60 x 5s = 5min) --
         Acc300In  = [double]0; Acc300Out = [double]0; Acc300N = [int]0
 
-        # ── Accumulateurs consolidation WEEK (360×5s = 30min) ─
+        # -- WEEK consolidation accumulators (360x5s = 30min) --
         Acc1800In = [double]0; Acc1800Out= [double]0; Acc1800N= [int]0
     }
 
-    # Compteurs bruts précédents pour calcul différentiel
+    # Previous raw counters for differential calculation
     $script:rawCounters[$Name] = @{
-        LastIn  = [long]-1   # -1 = pas encore initialisé
+        LastIn  = [long]-1   # -1 = not yet initialized
         LastOut = [long]-1
         LastTs  = [long]-1
     }
 }
 
 # ============================================================
-# SECTION 11 — AJOUT D'UN POINT DE MESURE
-# Appelée toutes les 5s avec les Mbps calculés
-# Met à jour les 4 vues et les accumulateurs
+# SECTION 11 - ADD A MEASUREMENT POINT
+# Called every 5s with the computed Mbps
+# Updates the 4 views and the accumulators
 # ============================================================
 function Add-DataPoint {
     param(
@@ -561,7 +650,7 @@ function Add-DataPoint {
     $iface = $script:interfaces[$IfaceName]
     if ($null -eq $iface) { return }
 
-    # ── Mise à jour des stats globales ──────────────────────
+    # -- Update global stats -----------------------------
     $iface.CurIn   = $MbpsIn
     $iface.CurOut  = $MbpsOut
     $iface.Samples++
@@ -570,12 +659,12 @@ function Add-DataPoint {
     if ($MbpsIn  -gt $iface.MaxIn)  { $iface.MaxIn  = $MbpsIn  }
     if ($MbpsOut -gt $iface.MaxOut) { $iface.MaxOut = $MbpsOut }
 
-    # ── Vue LIVE : chaque point brut ────────────────────────
+    # -- LIVE view: each raw point ---------------------------
     $iface.LiveTs   += $Ts
     $iface.LiveIn   += $MbpsIn
     $iface.LiveOut  += $MbpsOut
     $iface.LiveCount++
-    # Fenêtre glissante : on tronque si dépassement
+    # Sliding window: truncate on overflow
     if ($iface.LiveCount -gt $MaxPoints) {
         $cut = $iface.LiveCount - $MaxPoints
         $iface.LiveTs    = $iface.LiveTs[$cut..($iface.LiveCount-1)]
@@ -584,7 +673,7 @@ function Add-DataPoint {
         $iface.LiveCount = $MaxPoints
     }
 
-    # ── Vue HOUR : moyenne de 6 points (30s) ────────────────
+    # -- HOUR view: average of 6 points (30s) ----------------
     $iface.Acc30In  += $MbpsIn
     $iface.Acc30Out += $MbpsOut
     $iface.Acc30N++
@@ -608,7 +697,7 @@ function Add-DataPoint {
         $iface.Acc30N   = [int]0
     }
 
-    # ── Vue DAY : moyenne de 60 points (5 min) ──────────────
+    # -- DAY view: average of 60 points (5 min) --------------
     $iface.Acc300In  += $MbpsIn
     $iface.Acc300Out += $MbpsOut
     $iface.Acc300N++
@@ -631,7 +720,7 @@ function Add-DataPoint {
         $iface.Acc300N   = [int]0
     }
 
-    # ── Vue WEEK : moyenne de 360 points (30 min) ───────────
+    # -- WEEK view: average of 360 points (30 min) -----------
     $iface.Acc1800In  += $MbpsIn
     $iface.Acc1800Out += $MbpsOut
     $iface.Acc1800N++
@@ -656,16 +745,16 @@ function Add-DataPoint {
 }
 
 # ============================================================
-# SECTION 12 — COLLECTE DE LA BANDE PASSANTE
-# Calcule les Mbps par différence de compteurs octets
-# Gère l'overflow 32-bit des compteurs WMI
+# SECTION 12 - BANDWIDTH COLLECTION
+# Computes Mbps from the difference of byte counters
+# Handles 32-bit overflow of WMI counters
 # ============================================================
 function Collect-Bandwidth {
     $counters = Get-NetworkCounters
     $nowMs    = Get-NowMs
 
     if ($counters.Count -eq 0) {
-        Write-Host "  WARN : Compteurs réseau vides !" -ForegroundColor Red
+        Write-Host "  WARN : Network counters empty !" -ForegroundColor Red
         return
     }
 
@@ -675,11 +764,11 @@ function Collect-Bandwidth {
         $desc = if ($null -ne $info) { "$($info.Description)" } else { "" }
         if ($null -eq $raw) { continue }
 
-        # Trouver la clé compteur correspondant à cette interface
+        # Find the counter key matching this interface
         $cKey = Find-CounterKey -IfaceName $ifName -IfaceDesc $desc -Counters $counters
         if ($null -eq $cKey) {
             if (-not $script:debugDone) {
-                Write-Host "  WARN : Pas de compteur pour '$ifName'" -ForegroundColor Yellow
+                Write-Host "  WARN : No counter for '$ifName'" -ForegroundColor Yellow
             }
             continue
         }
@@ -687,45 +776,45 @@ function Collect-Bandwidth {
         $curIn  = [long]$counters[$cKey].BytesIn
         $curOut = [long]$counters[$cKey].BytesOut
 
-        # Premier passage : initialisation uniquement, pas de calcul
+        # First pass: initialization only, no calculation
         if ($raw.LastTs -lt 0) {
             $raw.LastIn  = $curIn
             $raw.LastOut = $curOut
             $raw.LastTs  = $nowMs
-            Write-Host "  Counter init OK : '$ifName' → '$cKey'" -ForegroundColor Green
+            Write-Host "  Counter init OK : '$ifName' -> '$cKey'" -ForegroundColor Green
             continue
         }
 
-        # Durée en secondes depuis la dernière mesure
+        # Duration in seconds since the last measurement
         $dtMs = $nowMs - $raw.LastTs
         if ($dtMs -lt 100) { continue }   # Trop rapide, ignorer
         $dtSec = [double]$dtMs / 1000.0
 
-        # Différence d'octets
+        # Byte difference
         $diffIn  = $curIn  - $raw.LastIn
         $diffOut = $curOut - $raw.LastOut
 
-        # Gestion overflow 32-bit des compteurs WMI
-        # (les compteurs repassent à 0 après 4 294 967 295)
+        # Handle 32-bit overflow of WMI counters
+        # (counters wrap to 0 after 4,294,967,295)
         $ov32 = [long]4294967295 + [long]1
         if ($diffIn  -lt 0 -and $diffIn  -gt -$ov32) { $diffIn  = $diffIn  + $ov32 }
         if ($diffOut -lt 0 -and $diffOut -gt -$ov32) { $diffOut = $diffOut + $ov32 }
-        # Valeur négative résiduelle = reset compteur (reboot)
+        # Residual negative value = counter reset (reboot)
         if ($diffIn  -lt 0) { $diffIn  = [long]0 }
         if ($diffOut -lt 0) { $diffOut = [long]0 }
 
-        # Conversion octets/s → Mbps
-        # Formule : (bytes / secondes) × 8 bits/byte / 1 000 000 bits/Mbit
+        # Convert bytes/s -> Mbps
+        # Formula: (bytes / seconds) * 8 bits/byte / 1,000,000 bits/Mbit
         $mbpsIn  = [double]$diffIn  / $dtSec * 8.0 / 1000000.0
         $mbpsOut = [double]$diffOut / $dtSec * 8.0 / 1000000.0
 
-        # Sanity check : valeur impossible (bug compteur ou overflow non géré)
+        # Sanity check: impossible value (counter bug or unhandled overflow)
         if ($mbpsIn  -gt 200000 -or $mbpsIn  -lt 0) { $mbpsIn  = [double]0 }
         if ($mbpsOut -gt 200000 -or $mbpsOut -lt 0) { $mbpsOut = [double]0 }
 
         Add-DataPoint -IfaceName $ifName -MbpsIn $mbpsIn -MbpsOut $mbpsOut -Ts $nowMs
 
-        # Sauvegarde pour la prochaine itération
+        # Save for the next iteration
         $raw.LastIn  = $curIn
         $raw.LastOut = $curOut
         $raw.LastTs  = $nowMs
@@ -735,16 +824,16 @@ function Collect-Bandwidth {
 }
 
 # ============================================================
-# SECTION 13 — SÉRIALISATION D'UNE VUE EN JSON
-# Produit un tableau JS [{t:...,i:...,o:...}, ...]
-# ⚠️ Double-ToJs obligatoire pour éviter la virgule locale FR
+# SECTION 13 - SERIALIZE A VIEW TO JSON
+# Produces a JS array [{t:...,i:...,o:...}, ...]
+# Double-ToJs is mandatory to avoid the FR locale comma
 # ============================================================
 function Serialize-View {
     param(
         [array]$Ts,     # Tableau de timestamps
-        [array]$In,     # Tableau de débits IN (Mbps)
-        [array]$Out,    # Tableau de débits OUT (Mbps)
-        [int]$Count     # Nombre de points valides
+        [array]$In,     # Array of IN rates (Mbps)
+        [array]$Out,    # Array of OUT rates (Mbps)
+        [int]$Count     # Number of valid points
     )
     $pts = @()
     for ($i = 0; $i -lt $Count; $i++) {
@@ -757,12 +846,12 @@ function Serialize-View {
 }
 
 # ============================================================
-# SECTION 14 — ÉCRITURE DU FICHIER network_data.js
-# Ce fichier est rechargé par le browser toutes les 2s
-# Il définit window.MD avec toutes les données courantes
+# SECTION 14 - WRITE THE network_data.js FILE
+# This file is reloaded by the browser every 2s
+# It defines window.MD with all current data
 # ============================================================
 function Write-DataJs {
-    # Calcul de la durée d'exécution
+    # Compute the elapsed run time
     $elapsed = Get-ElapsedSec
     $hh = [int]($elapsed / 3600)
     $mm = [int](($elapsed % 3600) / 60)
@@ -770,7 +859,7 @@ function Write-DataJs {
     $durStr = "$("{0:D2}" -f $hh)h $("{0:D2}" -f $mm)m $("{0:D2}" -f $ss)s"
     $nowStr = Get-Date -Format "HH:mm:ss"
 
-    # Construction du JSON des interfaces
+    # Build the interfaces JSON
     $ifParts = @()
     foreach ($ifName in $script:interfaces.Keys) {
         $iface    = $script:interfaces[$ifName]
@@ -782,13 +871,13 @@ function Write-DataJs {
             $linkMbps = [double]$info.LinkSpeedMbps
         }
 
-        # Sérialisation des 4 vues
+        # Serialize the 4 views
         $liveJs = Serialize-View $iface.LiveTs $iface.LiveIn $iface.LiveOut $iface.LiveCount
         $hourJs = Serialize-View $iface.HourTs $iface.HourIn $iface.HourOut $iface.HourCount
         $dayJs  = Serialize-View $iface.DayTs  $iface.DayIn  $iface.DayOut  $iface.DayCount
         $weekJs = Serialize-View $iface.WeekTs $iface.WeekIn $iface.WeekOut $iface.WeekCount
 
-        # Calcul des moyennes globales
+        # Compute the global averages
         $avgIn  = [double]0
         $avgOut = [double]0
         if ($iface.Samples -gt 0) {
@@ -813,7 +902,7 @@ function Write-DataJs {
             """week"":$weekJs}"
     }
 
-    # Sérialisation du mode d'échelle Y
+    # Serialize the Y scale mode
     $ysModeJs    = if ($script:YScaleMode -eq "auto") {
                        """auto"""
                    } else {
@@ -821,7 +910,7 @@ function Write-DataJs {
                    }
     $thrEnabledJs = if ($script:ThresholdEnabled) { "true" } else { "false" }
 
-    # Écriture du fichier JS
+    # Write the JS file
     $js = "window.MD={" +
           "ifaces:{" + ($ifParts -join ",") + "}," +
           "threshold:$(Double-ToJs ([double]$script:ThresholdAlert))," +
@@ -836,9 +925,9 @@ function Write-DataJs {
 }
 
 # ============================================================
-# SECTION 15 — LECTURE DES COMMANDES DU BROWSER
-# Le browser peut écrire dans mrtg_cmd.js pour modifier
-# threshold, yScale, etc. côté PS
+# SECTION 15 - READ BROWSER COMMANDS
+# The browser can write to mrtg_cmd.js to change
+# threshold, yScale, etc. on the PS side
 # ============================================================
 function Read-CmdFile {
     if (-not (Test-Path $cmdFile)) { return }
@@ -849,24 +938,24 @@ function Read-CmdFile {
             return
         }
 
-        # Mise à jour du seuil alarme
+        # Update the alarm threshold
         if ($raw -match '"threshold"\s*:\s*(\d+(?:[.,]\d+)?)') {
             $tStr = $Matches[1] -replace ',','.'
             $newT = [double]0
             try { $newT = [double]$tStr } catch {}
             if ($newT -gt 0 -and $newT -le 200000) {
                 $script:ThresholdAlert = $newT
-                Write-Host "  Threshold → $newT Mbps" -ForegroundColor Cyan
+                Write-Host "  Threshold -> $newT Mbps" -ForegroundColor Cyan
             }
         }
 
-        # Activation/désactivation du seuil
+        # Enable/disable the threshold
         if ($raw -match '"thresholdEnabled"\s*:\s*(true|false)') {
             $script:ThresholdEnabled = ($Matches[1] -eq "true")
-            Write-Host "  ThresholdEnabled → $($script:ThresholdEnabled)" -ForegroundColor Cyan
+            Write-Host "  ThresholdEnabled -> $($script:ThresholdEnabled)" -ForegroundColor Cyan
         }
 
-        # Changement du mode d'échelle Y
+        # Change the Y scale mode
         if ($raw -match '"yScale"\s*:\s*"([^"]+)"') {
             $newY = $Matches[1]
             if ($newY -eq "auto") {
@@ -885,8 +974,8 @@ function Read-CmdFile {
 
 # ============================================================
 # SECTION 16 — CHARGEMENT DE CHART.JS (OFFLINE)
-# Recherche chartjs.min.js dans plusieurs emplacements locaux
-# Fallback : tentative de téléchargement CDN
+# Look for chartjs.min.js in several local locations
+# Fallback: attempt CDN download
 # ============================================================
 function Get-ChartJsTag {
     $candidates = @(
@@ -897,7 +986,7 @@ function Get-ChartJsTag {
         "$env:USERPROFILE\Desktop\chartjs.min.js"
     )
 
-    Write-Host "  Chart.js : recherche locale..." -ForegroundColor Cyan
+    Write-Host "  Chart.js : local search..." -ForegroundColor Cyan
     foreach ($c in $candidates) {
         if (-not $c) { continue }
         if (Test-Path $c) {
@@ -905,7 +994,7 @@ function Get-ChartJsTag {
             if ($src -and $src.Length -gt 10000) {
                 Write-Host "  Chart.js : OK — $c ($([int]($src.Length/1024)) KB)" `
                            -ForegroundColor Green
-                # Copie dans le dossier de travail si nécessaire
+                # Copy to the working folder if needed
                 if ($c -ne "$scriptTemp\chartjs.min.js") {
                     try {
                         $src | Set-Content -Path "$scriptTemp\chartjs.min.js" `
@@ -917,8 +1006,8 @@ function Get-ChartJsTag {
         }
     }
 
-    # Tentative de téléchargement CDN (réseau disponible)
-    Write-Host "  Chart.js : tentative telechargement CDN..." -ForegroundColor Yellow
+    # Attempt CDN download (network available)
+    Write-Host "  Chart.js : attempting CDN download..." -ForegroundColor Yellow
     try {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add("User-Agent","PowerShell/5.1")
@@ -928,20 +1017,20 @@ function Get-ChartJsTag {
         if ($src -and $src.Length -gt 10000) {
             $src | Set-Content -Path "$scriptTemp\chartjs.min.js" `
                    -Encoding UTF8 -ErrorAction SilentlyContinue
-            Write-Host "  Chart.js : telecharge OK" -ForegroundColor Green
+            Write-Host "  Chart.js : downloaded OK" -ForegroundColor Green
             return "<script>`n$src`n</script>"
         }
     } catch {
-        Write-Host "  Chart.js : telechargement impossible" -ForegroundColor Red
+        Write-Host "  Chart.js : download failed" -ForegroundColor Red
     }
 
-    Write-Host "  >> ACTION : Deposez chartjs.min.js dans : $scriptTemp" -ForegroundColor Yellow
-    # Fallback CDN inline (nécessite internet dans le browser)
+    Write-Host "  >> ACTION : Drop chartjs.min.js into : $scriptTemp" -ForegroundColor Yellow
+    # Inline CDN fallback (requires internet in the browser)
     return '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
 }
 
 # ============================================================
-# SECTION 17 — OUVERTURE DU NAVIGATEUR
+# SECTION 17 - OPEN THE BROWSER
 # ============================================================
 function Open-Browser {
     param([string]$FilePath)
@@ -954,18 +1043,47 @@ function Open-Browser {
     )
     $found = $null
     foreach ($b in $browsers) { if (Test-Path $b) { $found = $b; break } }
-    if ($found) {
-        Write-Host "  Navigateur : $(Split-Path $found -Leaf)" -ForegroundColor Green
+
+    # file:// URL (Chromium's --app mode requires a URL)
+    $fileUrl = "file:///" + ($FilePath -replace '\\','/')
+
+    if ($found -and ($found -like "*msedge.exe" -or $found -like "*chrome.exe")) {
+        Write-Host "  Browser : $(Split-Path $found -Leaf) (app mode - monitored)" -ForegroundColor Green
+        # Application mode + dedicated profile = clean, monitorable process.
+        # Suppress pop-ups (sync / sign-in / translation).
+        $bargs = @(
+            "--app=$fileUrl",
+            "--user-data-dir=$profileDir",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "--disable-features=msEdgeSyncBubble,msImplicitSignin,Translate,TranslateUI,msTranslateBubble"
+        )
+        try {
+            $proc = Start-Process -FilePath $found -PassThru -ArgumentList $bargs
+            return $proc
+        } catch {
+            # Fallback: simple open if app mode fails (no auto-stop)
+            Start-Process -FilePath $found -ArgumentList "`"$FilePath`""
+            return $null
+        }
+    }
+    elseif ($found) {
+        Write-Host "  Browser : $(Split-Path $found -Leaf) (auto-stop unavailable)" -ForegroundColor Yellow
         Start-Process -FilePath $found -ArgumentList "`"$FilePath`""
-    } else {
+        return $null
+    }
+    else {
+        Write-Host "  Browser : default (auto-stop unavailable)" -ForegroundColor Yellow
         Start-Process $FilePath
+        return $null
     }
 }
 
 # ============================================================
-# SECTION 18 — GÉNÉRATION DU HTML
-# Génère dashboard.html avec Chart.js embarqué
-# Le HTML est statique, les données arrivent via network_data.js
+# SECTION 18 - HTML GENERATION
+# Generates dashboard.html with embedded Chart.js
+# The HTML is static; data arrives via network_data.js
 # ============================================================
 function Write-HtmlOnce {
     $dataFileJs  = $dataFile -replace '\\','\\\\'
@@ -980,10 +1098,10 @@ function Write-HtmlOnce {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>PS-MRTG v1.16 — MRTG Bandwidth Monitor</title>
+<title>PS-MRTG v1.20 - MRTG Bandwidth Monitor</title>
 $chartJsTag
 <style>
-/* ── Variables CSS thème dark (défaut) ───────────────────── */
+/* -- CSS variables, dark theme (default) ------------------- */
 :root{
   --bg:#1a1a2e;--surface:#16213e;--surface2:#0d1b2a;--surface3:#0a1220;
   --border:#0f3460;--border2:#1e3050;--border3:#0a1830;
@@ -1006,7 +1124,7 @@ $chartJsTag
   --cell-bg:#0d1b2a;--cell-bd:#1e3050;
   --opt-bg:#0a1520;--opt-bd:#0f3460;
 }
-/* ── Variables CSS thème light ───────────────────────────── */
+/* -- CSS variables, light theme --------------------------── */
 [data-theme="light"]{
   --bg:#f0f4f8;--surface:#ffffff;--surface2:#e8edf5;--surface3:#dde4ee;
   --border:#b0c0d8;--border2:#c8d4e8;--border3:#d0dcea;
@@ -1045,7 +1163,7 @@ body{background:var(--bg);color:var(--text);
 .vtag{background:var(--accent2);color:var(--accent);font-size:.7em;
       padding:2px 7px;border-radius:10px;font-weight:bold}
 .hr2{display:flex;gap:8px;align-items:center;flex-shrink:0}
-/* Point clignotant indiquant l'activité du monitoring */
+/* Blinking dot indicating monitoring activity */
 .hdot{width:8px;height:8px;border-radius:50%;background:var(--ok);
       animation:pl 1.2s infinite;flex-shrink:0}
 .dur{color:var(--warn);font-size:.83em;font-weight:bold;white-space:nowrap}
@@ -1055,7 +1173,7 @@ body{background:var(--bg);color:var(--text);
 .thbtn:hover{filter:brightness(1.25)}
 @keyframes pl{0%,100%{opacity:1}50%{opacity:.25}}
 
-/* ── Tabs niveau 1 : sélection de l'interface ────────────── */
+/* -- Level 1 tabs: interface selection --------------------── */
 .tabs1{background:var(--tab1-bg);border-bottom:2px solid var(--border);
        display:flex;align-items:flex-end;padding:0 12px;
        gap:2px;flex-shrink:0;overflow-x:auto;min-height:36px}
@@ -1068,11 +1186,11 @@ body{background:var(--bg);color:var(--text);
 .t1btn:hover{color:var(--tab1-act-c);background:var(--surface2)}
 .t1btn.a{background:var(--tab1-act);color:var(--tab1-act-c);
           border-color:var(--tab1-bd);border-bottom-color:var(--tab1-act)}
-/* Petit point vert clignotant dans chaque tab interface */
+/* Small blinking green dot in each interface tab */
 .t1dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
        animation:pl 1.4s infinite;flex-shrink:0}
 
-/* ── Panneau par interface ───────────────────────────────── */
+/* -- Per-interface panel --------------------------------- */
 .iface-panel{display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0}
 .iface-panel.a{display:flex}
 
@@ -1086,7 +1204,7 @@ body{background:var(--bg);color:var(--text);
 .sl{color:var(--text3)}.sv{font-weight:bold}
 .sin{color:var(--ok)}.sout{color:var(--accent)}.sn{color:var(--text2)}
 
-/* ── Tabs niveau 2 : sélection de la vue temporelle ─────── */
+/* -- Level 2 tabs: time view selection ------------------- */
 .tabs2{background:var(--tab2-bg);padding:0 12px;
        display:flex;align-items:center;gap:3px;
        border-bottom:1px solid var(--border2);min-height:32px;flex-shrink:0}
@@ -1097,14 +1215,14 @@ body{background:var(--bg);color:var(--text);
 .t2btn.a{background:var(--tab2-act);color:var(--tab2-act-c);border-color:var(--tab2-bd)}
 .t2all{color:var(--accent)}.t2all.a{background:var(--accent2);border-color:var(--accent)}
 
-/* ── Zone graphiques ─────────────────────────────────────── */
+/* -- Chart area ------------------------------------------- */
 .gcont{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
-/* Vue individuelle (pleine largeur) */
+/* Individual view (full width) */
 .gview{display:none;flex:1;flex-direction:column;
        padding:10px 12px 6px;overflow:hidden;min-height:0}
 .gview.a{display:flex}
 .gview canvas{flex:1;min-height:0}
-/* Vue "Tous" : grille 2×2 des 4 graphiques */
+/* "All" view: 2x2 grid of the 4 charts */
 .gall{display:none;flex:1;overflow:hidden;
       grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;
       gap:6px;padding:6px 12px}
@@ -1112,18 +1230,18 @@ body{background:var(--bg);color:var(--text);
 .gcell{background:var(--cell-bg);border:1px solid var(--cell-bd);
        border-radius:5px;padding:6px 8px;
        display:flex;flex-direction:column;overflow:hidden;min-height:0}
-/* Entête d'une cellule graphique (label + stats mini) */
+/* Header of a chart cell (label + mini stats) */
 .gclbl{font-size:.7em;font-weight:bold;color:var(--text3);margin-bottom:3px;
        flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
 .gclbl-s{font-size:.85em;color:var(--text4)}
 .gcell canvas{flex:1;min-height:0}
 
-/* ── Footer : bouton snapshot + panneau Options ──────────── */
+/* -- Footer: snapshot button + Options panel -------------── */
 .fbar{background:var(--surface);border-top:1px solid var(--border);
       padding:0;display:flex;flex-direction:column;flex-shrink:0}
 .fbar-main{display:flex;align-items:center;gap:10px;
            padding:5px 14px;flex-wrap:wrap;min-height:40px}
-/* Panneau options (foldable) */
+/* Options panel (foldable) */
 .fbar-opts{background:var(--opt-bg);border-top:1px solid var(--opt-bd);
            padding:7px 14px;display:none;flex-wrap:wrap;gap:14px;align-items:center}
 .fbar-opts.open{display:flex}
@@ -1132,10 +1250,10 @@ body{background:var(--bg);color:var(--text);
            text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
 .opt-sep{width:1px;height:22px;background:var(--border2);flex-shrink:0}
 
-/* ── Contrôles du panneau Options ────────────────────────── */
+/* -- Options panel controls -------------------------------- */
 .ci{display:flex;align-items:center;gap:5px}
 .ci label{color:var(--text3);font-size:.76em;white-space:nowrap}
-/* Slider taille des points */
+/* Point size slider */
 .sg{display:flex;align-items:center;gap:5px}
 .sg label{color:var(--text3);font-size:.75em;white-space:nowrap}
 .sg .sv2{color:var(--accent);font-weight:bold;font-size:.78em;min-width:48px}
@@ -1145,7 +1263,7 @@ input[type=number]{background:var(--inp-bg);border:1px solid var(--inp-bd);
                    font-size:.8em;width:85px;
                    font-family:Consolas,monospace;font-weight:bold}
 input[type=number]:focus{outline:2px solid var(--accent)}
-/* Checkbox activation du seuil */
+/* Threshold enable checkbox */
 .thr-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;
             font-size:.76em;color:var(--text2);user-select:none}
 .thr-toggle input[type=checkbox]{width:14px;height:14px;cursor:pointer;
@@ -1162,12 +1280,12 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
          font-size:.72em;padding:3px 9px}
 .btn-opt:hover{color:var(--accent);border-color:var(--accent);opacity:1}
 .btnsnap{background:var(--btn2-bg);color:var(--btn2-c);border-color:var(--btn2-c)}
-/* Légende IN/OUT/10M/Seuil */
+/* Legend IN/OUT/10M/Threshold */
 .leg{display:flex;gap:10px;align-items:center;margin-left:auto}
 .legitem{display:flex;align-items:center;gap:4px;font-size:.73em;color:var(--text2)}
 .legline{width:18px;height:3px;border-radius:2px}
 .legin{background:var(--ok)}.legout{background:var(--accent)}
-/* Badge d'échelle Y dans le header */
+/* Y scale badge in the header */
 .yscale-badge{font-size:.72em;font-weight:bold;background:var(--accent2);
               color:var(--accent);padding:2px 8px;border-radius:10px;
               border:1px solid var(--border2);white-space:nowrap}
@@ -1188,10 +1306,10 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
         MRTG Bandwidth Monitor
       </span>
     </h1>
-    <span class="vtag">v1.16</span>
+    <span class="vtag">v1.20</span>
   </div>
   <div class="hr2">
-    <!-- Badge mode échelle Y courant -->
+    <!-- Current Y scale mode badge -->
     <span class="yscale-badge" id="ysBadge">Y: Auto</span>
     <span class="nowt" id="nowLbl">--:--:--</span>
     <span class="dur"  id="durLbl">00h 00m 00s</span>
@@ -1199,10 +1317,10 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
   </div>
 </div>
 
-<!-- ── TABS NIVEAU 1 : interfaces (générés dynamiquement) ── -->
+<!-- LEVEL 1 TABS: interfaces (generated dynamically) -->
 <div class="tabs1" id="tabs1"></div>
 
-<!-- ── PANNEAUX PAR INTERFACE (générés dynamiquement) ─────── -->
+<!-- -- PER-INTERFACE PANELS (generated dynamically) -------- -->
 <div id="panels" style="flex:1;display:flex;flex-direction:column;
      overflow:hidden;min-height:0"></div>
 
@@ -1213,7 +1331,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
     <button class="btn btnsnap" onclick="exportSnapshot()">
       &#128247; Snapshot HTML
     </button>
-    <!-- Légende des couleurs -->
+    <!-- Color legend -->
     <div class="leg">
       <div class="legitem">
         <div class="legline legin"></div>&#8595; IN
@@ -1229,7 +1347,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
       <div class="legitem" id="legThr" style="color:var(--danger)">
         <div style="width:18px;height:2px;
              border-top:2px dashed rgba(248,113,113,.85)"></div>
-        Seuil
+        Threshold
       </div>
     </div>
     <button class="btn btn-opt" id="optToggle" onclick="togOpts()">
@@ -1237,18 +1355,18 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
     </button>
   </div>
 
-  <!-- Panneau Options (foldable, fermé par défaut) -->
+  <!-- Options panel (foldable, closed by default) -->
   <div class="fbar-opts" id="fbarOpts">
 
-    <!-- Groupe : Seuil alarme -->
+    <!-- Group: Alarm threshold -->
     <div class="opt-group">
-      <span class="opt-title">Seuil alarme</span>
-      <!-- Checkbox activer/désactiver le seuil -->
+      <span class="opt-title">Alarm threshold</span>
+      <!-- Checkbox to enable/disable the threshold -->
       <label class="thr-toggle">
         <input type="checkbox" id="thrEnabled" onchange="toggleThr()">
-        <span>Actif</span>
+        <span>Active</span>
       </label>
-      <!-- Champ valeur + bouton appliquer -->
+      <!-- Value field + apply button -->
       <div class="ci" id="thrInputGroup">
         <input type="number" id="thrInput" value="$initThr" min="1" max="200000">
         <span style="color:var(--text3);font-size:.76em">Mbps</span>
@@ -1258,11 +1376,11 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 
     <div class="opt-sep"></div>
 
-    <!-- Groupe : Echelle Y -->
+    <!-- Group: Y scale -->
     <div class="opt-group">
-      <span class="opt-title">Echelle Y</span>
+      <span class="opt-title">Y scale</span>
       <select id="ysSelect" onchange="applyYScale()">
-        <option value="auto">Auto (paliers)</option>
+        <option value="auto">Auto (steps)</option>
         <option value="10">10 Mbps</option>
         <option value="20">20 Mbps</option>
         <option value="50">50 Mbps</option>
@@ -1280,7 +1398,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 
     <div class="opt-sep"></div>
 
-    <!-- Groupe : Taille des points -->
+    <!-- Group: Point size -->
     <div class="opt-group">
       <span class="opt-title">Points</span>
       <div class="sg">
@@ -1298,57 +1416,57 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 // ============================================================
 // CONFIG
 // ============================================================
-var DJP = '$dataFileJs';  // Chemin du fichier network_data.js
+var DJP = '$dataFileJs';  // Path of the network_data.js file
 
 // ============================================================
-// ÉTAT GLOBAL DE L'UI
+// GLOBAL UI STATE
 // ============================================================
-var MD          = null;    // Dernières données reçues de PS
-var charts      = {};      // Registre des Chart instances (clé = sid_view_suf)
-var curIface    = null;    // Interface active actuellement affichée
-var curViews    = {};      // Vue active par interface (all/live/hour/day/week)
-var darkMode    = true;    // Thème courant
-var optsOpen    = false;   // Panneau Options ouvert/fermé
-var ifaceOrder  = [];      // Ordre des interfaces (pour la cohérence)
-var initialized = false;   // Panels HTML déjà construits
+var MD          = null;    // Last data received from PS
+var charts      = {};      // Registry of Chart instances (key = sid_view_suf)
+var curIface    = null;    // Currently displayed active interface
+var curViews    = {};      // Active view per interface (all/live/hour/day/week)
+var darkMode    = true;    // Current theme
+var optsOpen    = false;   // Options panel open/closed
+var ifaceOrder  = [];      // Interface order (for consistency)
+var initialized = false;   // HTML panels already built
 
-// Paliers automatiques d'échelle Y (Mbps) — progression fine 1-2-5
-// ✅ v1.10 : paliers intermédiaires ajoutés (notamment 200 et 500 Mbps)
-//    pour éviter les sauts brutaux 100 Mbps → 1 Gbps.
+// Automatic Y scale steps (Mbps) - fine 1-2-5 progression
+// v1.10: intermediate steps added (notably 200 and 500 Mbps)
+//    to avoid abrupt 100 Mbps -> 1 Gbps jumps.
 var Y_STEPS = [1, 2, 5, 10, 20, 50, 100, 200, 500,
                1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000];
 
-// Paramètres Options — initialisés depuis PS une seule fois (uiInitDone)
-var thrVal      = $initThr;       // Valeur du seuil en Mbps
-var thrEnabled  = $initThrEn;     // Seuil actif ou non
-var yScaleMode  = '$initYScale';  // "auto" ou valeur numérique
-var ptSize      = 0.5;            // Taille des points en px (défaut 0.5)
+// Options settings - initialized from PS only once (uiInitDone)
+var thrVal      = $initThr;       // Threshold value in Mbps
+var thrEnabled  = $initThrEn;     // Threshold active or not
+var yScaleMode  = '$initYScale';  // "auto" or numeric value
+var ptSize      = 0.5;            // Point size in px (default 0.5)
 
-// ✅ FLAG CRITIQUE : PS initialise l'UI une seule fois au chargement
-// Sans ce flag, chaque cycle de 2s écraserait les choix utilisateur
+// CRITICAL FLAG: PS initializes the UI only once on load
+// Without this flag, each 2s cycle would overwrite the user's choices
 var uiInitDone  = false;
 
 var VIEWS = ['live','hour','day','week'];
-// Libellé court affiché à côté de chaque graphique : RÉSOLUTION + RECUL.
-// ✅ v1.14 : la période couverte (le « recul ») est désormais explicite.
-//    Correction : la vue « hour » couvre en réalité 6h (et non 1h).
+// Short label shown next to each chart: RESOLUTION + LOOK-BACK.
+// v1.14: the covered period (the "look-back") is now explicit.
+//    Fix: the "hour" view actually covers 6h (not 1h).
 var VL    = {
   live : 'Live \u00B7 1h (5s)',
   hour : '6h (30s)',
-  day  : '2.5j (5min)',
-  week : '15j (30min)'
+  day  : '2.5d (5min)',
+  week : '15d (30min)'
 };
-// Infobulle (title) : explication complète du recul, au survol.
+// Tooltip (title): full look-back explanation, on hover.
 var VLT   = {
-  live : 'Temps r\u00E9el \u2014 recul 1 heure (1 point / 5 s)',
-  hour : 'Recul 6 heures (1 point / 30 s)',
-  day  : 'Recul 2,5 jours (1 point / 5 min)',
-  week : 'Recul 15 jours (1 point / 30 min)'
+  live : 'Real time \u2014 1 hour look-back (1 point / 5 s)',
+  hour : '6 hour look-back (1 point / 30 s)',
+  day  : '2.5 day look-back (1 point / 5 min)',
+  week : '15 day look-back (1 point / 30 min)'
 };
-// ✅ v1.15 : durée de la fenêtre temporelle de chaque vue (en ms).
-//   Sert à fixer le domaine de l'axe X → les données s'affichent à leur
-//   position réelle (un historique partiel n'occupe qu'une fraction de
-//   la largeur, pas toute la largeur).
+// v1.15: time window duration of each view (in ms).
+//   Used to fix the X axis domain -> data is drawn at its
+//   real position (a partial history only occupies a fraction of
+//   the width, not the whole width).
 var VWIN  = {
   live : 3600000,      //  1 h   = 60 * 60 * 1000
   hour : 21600000,     //  6 h   = 6 * 3600 * 1000
@@ -1357,7 +1475,7 @@ var VWIN  = {
 };
 
 // ============================================================
-// THÈME DARK/LIGHT
+// DARK/LIGHT THEME
 // ============================================================
 function togTheme(){
   darkMode = !darkMode;
@@ -1367,7 +1485,7 @@ function togTheme(){
 }
 
 // ============================================================
-// PANNEAU OPTIONS (foldable)
+// OPTIONS PANEL (foldable)
 // ============================================================
 function togOpts(){
   optsOpen = !optsOpen;
@@ -1381,10 +1499,10 @@ function togOpts(){
 // HELPERS UTILITAIRES
 // ============================================================
 
-// Lit une variable CSS définie dans :root
+// Reads a CSS variable defined in :root
 function gcs(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-// Échappe le HTML pour éviter les injections
+// Escapes HTML to prevent injection
 function escH(s){
   if(!s) return '';
   return String(s)
@@ -1392,14 +1510,14 @@ function escH(s){
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// Transforme un nom en identifiant CSS safe (alphanum + _)
+// Turns a name into a CSS-safe identifier (alphanum + _)
 function sid(s){ return s.replace(/[^a-zA-Z0-9]/g,'_'); }
 
-// Formate un timestamp Unix ms pour l'axe X, selon la vue.
-// ✅ v1.13 : les vues multi-jours (day/week) affichent la date ET l'heure
-//    sur UNE SEULE ligne, au format « JJ/MM HH:MM ». Les graduations
-//    sont espacées (3 en grille / 6 en plein écran) pour garantir qu'aucun
-//    libellé ne se chevauche.
+// Formats a Unix ms timestamp for the X axis, by view.
+// v1.13: multi-day views (day/week) show date AND time
+//    on a SINGLE line, in "DD/MM HH:MM" format. The ticks
+//    are spaced (3 in grid / 6 in full screen) to ensure no
+//    label overlaps.
 function ft(ms, view){
   var n = parseInt(ms,10);
   if(isNaN(n) || n <= 0) return '';
@@ -1408,17 +1526,17 @@ function ft(ms, view){
   var mm = ('0'+d.getMinutes()).slice(-2);
   var ss = ('0'+d.getSeconds()).slice(-2);
   var dm = ('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2);
-  // Live (≈1h) : précision à la seconde
+  // Live (~1h): second-level precision
   if(view === 'live') return hh+':'+mm+':'+ss;
-  // 1h (≈6h) : heure:minute (toujours le même jour à l'écran)
+  // 1h (~6h): hour:minute (always the same day on screen)
   if(view === 'hour') return hh+':'+mm;
-  // Day (2.5j) & Week (15j) : date + heure sur une seule ligne
+  // Day (2.5d) & Week (15d): date + time on a single line
   return dm+' '+hh+':'+mm;
 }
 
-// Formate un timestamp complet pour l'infobulle (titre du tooltip).
-// ✅ v1.15 : « JJ/MM HH:MM:SS » — l'axe X étant numérique (ms), il faut
-//    reformater nous-mêmes le titre du tooltip.
+// Formats a full timestamp for the tooltip (tooltip title).
+// v1.15: "DD/MM HH:MM:SS" - the X axis being numeric (ms), we must
+//    reformat the tooltip title ourselves.
 function ftTip(ms){
   var n = parseInt(ms,10);
   if(isNaN(n) || n <= 0) return '';
@@ -1428,7 +1546,7 @@ function ftTip(ms){
          ('0'+d.getSeconds()).slice(-2);
 }
 
-// Formate une valeur Mbps en string lisible (1 ligne — tooltips/stats)
+// Formats an Mbps value into a readable string (1 line - tooltips/stats)
 function fmb(v){
   v = parseFloat(v);
   if(isNaN(v) || v < 0) return '--';
@@ -1439,21 +1557,21 @@ function fmb(v){
 }
 
 // ============================================================
-// FORMATAGE DES GRADUATIONS DE L'AXE Y (multi-lignes)
-// ✅ v1.9 : pour un axe lisible, on renvoie un TABLEAU à Chart.js v4
-//    → la valeur s'affiche sur la 1re ligne, l'unité sur la 2e ligne.
-//    L'unité est choisie par valeur (comme fmb) : 200→"200 Mbps",
-//    1000→"1 Gbps", ce qui reste naturel même sur un axe mixte.
+// Y AXIS TICK FORMATTING (multi-line)
+// v1.9: for a readable axis, return an ARRAY to Chart.js v4
+//    -> the value shows on line 1, the unit on line 2.
+//    The unit is chosen by value (like fmb): 200->"200 Mbps",
+//    1000->"1 Gbps", which stays natural even on a mixed axis.
 // ============================================================
 function yTick(value){
   var v = parseFloat(value);
   if(isNaN(v) || v < 0) return '';
-  if(v === 0) return '0';                 // le zéro reste sur 1 ligne, sans unité
+  if(v === 0) return '0';                 // zero stays on 1 line, no unit
   if(v >= 1000){
     var g = v / 1000;
     var gs = (g % 1 === 0) ? String(g)
             : g.toFixed(2).replace(/0+$/,'').replace(/\.$/,'');
-    return [gs, 'Gbps'];                   // ligne 1 = valeur, ligne 2 = unité
+    return [gs, 'Gbps'];                   // line 1 = value, line 2 = unit
   }
   if(v >= 1){
     var ms = (v % 1 === 0) ? String(v) : v.toFixed(1);
@@ -1462,27 +1580,27 @@ function yTick(value){
   return [String(Math.round(v * 1000)), 'Kbps'];
 }
 
-// Met à jour le textContent d'un élément par son id
+// Updates the textContent of an element by its id
 function sel(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; }
 
 // ============================================================
-// ÉCHELLE Y — CALCUL DU PALIER
+// Y SCALE - STEP CALCULATION
 // ============================================================
 
-// Calcule le yMax (palier) selon le mode et une valeur max fournie.
-// ⚠️ v1.9 : l'inclusion éventuelle du seuil est gérée PAR L'APPELANT
-//    (updateChartsForIface), qui passe max(données, seuil) pour que la
-//    ligne d'alarme reste visible et que les 4 vues partagent la même hauteur.
+// Computes yMax (step) based on the mode and a given max value.
+// v1.9: the optional inclusion of the threshold is handled BY THE CALLER
+//    (updateChartsForIface), which passes max(data, threshold) so the
+//    alarm line stays visible and the 4 views share the same height.
 function calcYMax(dataMax){
   if(yScaleMode !== 'auto'){ return parseFloat(yScaleMode) || 1000; }
-  // Mode auto : premier palier qui contient la valeur
+  // Auto mode: first step that contains the value
   for(var i=0; i<Y_STEPS.length; i++){
     if(dataMax <= Y_STEPS[i]){ return Y_STEPS[i]; }
   }
   return Y_STEPS[Y_STEPS.length-1];
 }
 
-// Met à jour le badge Y: dans le header
+// Updates the Y: badge in the header
 function updateYBadge(){
   var badge = document.getElementById('ysBadge');
   if(!badge) return;
@@ -1499,7 +1617,7 @@ function updateYBadge(){
   }
 }
 
-// Synchronise le select Echelle Y avec yScaleMode courant
+// Syncs the Y scale select with the current yScaleMode
 function syncYSelect(){
   var s = document.getElementById('ysSelect');
   if(!s) return;
@@ -1516,33 +1634,33 @@ function applyYScale(){
 }
 
 // ============================================================
-// SEUIL ALARME
+// ALARM THRESHOLD
 // ============================================================
 
-// Toggle checkbox Actif/Inactif
-// ⚠️ uiInitDone garantit que ce choix ne sera pas réécrasé par PS
+// Toggle Active/Inactive checkbox
+// uiInitDone ensures this choice will not be overwritten by PS
 function toggleThr(){
   thrEnabled = document.getElementById('thrEnabled').checked;
   updateThrUI();
   redrawAll();
 }
 
-// Met à jour l'état visuel des contrôles seuil
+// Updates the visual state of the threshold controls
 function updateThrUI(){
   var grp = document.getElementById('thrInputGroup');
   var leg = document.getElementById('legThr');
   var cb  = document.getElementById('thrEnabled');
   if(cb)  cb.checked = thrEnabled;
-  // Grise les contrôles si seuil désactivé
+  // Grays out the controls if the threshold is disabled
   if(grp){
     grp.style.opacity      = thrEnabled ? '1'   : '.35';
     grp.style.pointerEvents= thrEnabled ? ''    : 'none';
   }
-  // Atténue la légende si seuil désactivé
+  // Dims the legend if the threshold is disabled
   if(leg) leg.style.opacity = thrEnabled ? '1' : '.25';
 }
 
-// Applique la nouvelle valeur du seuil
+// Applies the new threshold value
 function applyThr(){
   var v = parseFloat(document.getElementById('thrInput').value);
   if(isNaN(v) || v <= 0) return;
@@ -1551,10 +1669,10 @@ function applyThr(){
 }
 
 // ============================================================
-// TAILLE DES POINTS
-// ✅ FIX v1.8 : pointRadius doit être un TABLEAU de valeurs
-//    Chart.js v4 ignore la valeur scalaire dans dataset.pointRadius
-//    quand les données changent — seul le tableau est garanti
+// POINT SIZE
+// FIX v1.8: pointRadius must be an ARRAY of values
+//    Chart.js v4 ignores the scalar value in dataset.pointRadius
+//    when the data changes - only the array is guaranteed
 // ============================================================
 function updPtSize(v){
   v = parseFloat(v);
@@ -1565,15 +1683,15 @@ function updPtSize(v){
 }
 
 // ============================================================
-// PLUGIN CHART.JS — LIGNES DE SEUIL
-// Dessiné après le rendu principal via afterDraw
+// CHART.JS PLUGIN - THRESHOLD LINES
+// Drawn after the main render via afterDraw
 // ============================================================
 Chart.register({
   id: 'thrlines',
   afterDraw: function(chart){
     var thr = chart.config._thr;
     if(!thr) return;
-    // Police adaptée au mode (grille compacte vs plein écran)
+    // Font adapted to the mode (compact grid vs full screen)
     var compact = chart.config._compact;
     var lblFont = compact ? 'bold 9px Consolas' : 'bold 11px Consolas';
     var c2 = chart.ctx;
@@ -1583,7 +1701,7 @@ Chart.register({
     var yMax = ys.max || 0;
     c2.save();
 
-    // Ligne indicative 10M (gris discret) — toujours visible si dans la plage
+    // 10M reference line (subtle gray) - always visible if within range
     try{
       var y10 = ys.getPixelForValue(10);
       if(y10 >= ys.top && y10 <= ys.bottom){
@@ -1600,10 +1718,10 @@ Chart.register({
       }
     }catch(e){}
 
-    // Ligne seuil rouge — uniquement si activée ET dans la plage visible
-    // ✅ v1.9 : l'échelle est désormais calculée pour inclure le seuil
-    //    (mode auto) → thr.alert <= yMax est toujours vrai et la ligne
-    //    apparaît simultanément sur les 4 graphiques.
+    // Red threshold line - only if enabled AND within the visible range
+    // v1.9: the scale is now computed to include the threshold
+    //    (auto mode) -> thr.alert <= yMax is always true and the line
+    //    appears simultaneously on all 4 charts.
     if(thr.enabled && thr.alert > 0 && thr.alert <= yMax){
       try{
         var yA = ys.getPixelForValue(thr.alert);
@@ -1627,9 +1745,9 @@ Chart.register({
 });
 
 // ============================================================
-// CRÉATION D'UN CHART
-// compact=true pour la vue "Tous" (4 graphes en grille 2×2)
-// compact=false pour la vue individuelle (pleine largeur)
+// CREATE A CHART
+// compact=true for the "All" view (4 charts in a 2x2 grid)
+// compact=false for the individual view (full width)
 // ============================================================
 function makeChart(cid, compact){
   var cv = document.getElementById(cid);
@@ -1645,8 +1763,8 @@ function makeChart(cid, compact){
           borderColor:     gcs('--in-c'),
           backgroundColor: gcs('--in-f'),
           borderWidth:     compact ? 1 : 1.5,
-          // ✅ Tableau vide — sera rempli à chaque update
-          // Chart.js v4 honore pointRadius comme tableau par point
+          // Empty array - will be filled on each update
+          // Chart.js v4 honors pointRadius as a per-point array
           pointRadius:     [],
           pointHoverRadius:[],
           fill: true, tension: .2, spanGaps: false
@@ -1678,14 +1796,14 @@ function makeChart(cid, compact){
       },
       scales: {
         x: {
-          // ✅ v1.15 : axe X LINÉAIRE à domaine temporel fixe.
-          //   L'abscisse est le temps réel (timestamp ms) ; le domaine
-          //   [min;max] est imposé par updateChartsForIface. Résultat :
-          //   un historique partiel n'occupe que sa fraction de largeur.
+          // v1.15: LINEAR X axis with fixed time domain.
+          //   The x value is real time (timestamp ms); the domain
+          //   [min;max] is imposed by updateChartsForIface. Result:
+          //   a partial history only occupies its fraction of the width.
           type: 'linear',
-          // ✅ v1.16 : axe X divisé en 6 segments ÉGAUX (7 graduations).
-          //   Le pas vaut fenêtre/6 → 10 min (Live 1h), 1 h (6h),
-          //   10 h (2.5j), 60 h (15j). Même logique pour tous les graphes.
+          // v1.16: X axis split into 6 EQUAL segments (7 ticks).
+          //   The step is window/6 -> 10 min (Live 1h), 1 h (6h),
+          //   10 h (2.5d), 60 h (15d). Same logic for all charts.
           afterBuildTicks: function(scale){
             var lo = scale.min, hi = scale.max;
             if(!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
@@ -1695,12 +1813,12 @@ function makeChart(cid, compact){
           },
           ticks: {
             color: gcs('--tick'),
-            // Affiche les 7 graduations sans en sauter aucune
+            // Show all 7 ticks without skipping any
             autoSkip: false,
-            // ✅ v1.11 : heures à la même taille que les débits (axe Y)
+            // v1.11: hours at the same size as the rates (Y axis)
             font: { size: compact ? 9 : 12, family: 'Consolas' },
             maxRotation: 0,
-            // Reformatte le timestamp (ms) selon la vue du graphique
+            // Reformats the timestamp (ms) by the chart's view
             callback: function(value){
               var vw = (this.chart && this.chart.config && this.chart.config._view)
                        ? this.chart.config._view : 'live';
@@ -1713,12 +1831,12 @@ function makeChart(cid, compact){
           min: 0,
           ticks: {
             color: gcs('--tickY'),
-            // ✅ v1.9 : police agrandie pour la lisibilité
+            // v1.9: larger font for readability
             font: { size: compact ? 9 : 12, family: 'Consolas' },
-            // Moins de graduations : laisse la place aux libellés 2 lignes
+            // Fewer ticks: leaves room for 2-line labels
             maxTicksLimit: compact ? 5 : 7,
             padding: 3,
-            // ✅ v1.9 : libellé multi-lignes (valeur + unité)
+            // v1.9: multi-line label (value + unit)
             callback: yTick
           },
           grid: { color: gcs('--grid2') }
@@ -1732,8 +1850,8 @@ function makeChart(cid, compact){
 }
 
 // ============================================================
-// INITIALISATION DES PANELS HTML
-// Appelée au premier chargement et si les interfaces changent
+// HTML PANEL INITIALIZATION
+// Called on first load and when interfaces change
 // ============================================================
 function initPanels(ifaces){
   var t1     = document.getElementById('tabs1');
@@ -1746,7 +1864,7 @@ function initPanels(ifaces){
   ifaceOrder.forEach(function(name, idx){
     var s = sid(name);
 
-    // Création du tab niveau 1
+    // Create the level 1 tab
     var tab = document.createElement('div');
     tab.className = 't1btn' + (idx === 0 ? ' a' : '');
     tab.id = 't1_' + s;
@@ -1754,7 +1872,7 @@ function initPanels(ifaces){
     tab.onclick = (function(n){ return function(){ selectIface(n); }; })(name);
     t1.appendChild(tab);
 
-    // Création du panneau interface
+    // Create the interface panel
     var panel = document.createElement('div');
     panel.className = 'iface-panel' + (idx === 0 ? ' a' : '');
     panel.id = 'panel_' + s;
@@ -1766,10 +1884,10 @@ function initPanels(ifaces){
 
   if(ifaceOrder.length > 0) curIface = ifaceOrder[0];
 
-  // Initialisation des charts pour chaque interface
+  // Initialize the charts for each interface
   ifaceOrder.forEach(function(name){ initChartsForIface(name); });
 
-  // Synchronisation des contrôles Options
+  // Synchronize the Options controls
   syncYSelect();
   updateYBadge();
   updateThrUI();
@@ -1777,7 +1895,7 @@ function initPanels(ifaces){
 }
 
 // ============================================================
-// CONSTRUCTION DU HTML D'UN PANNEAU INTERFACE
+// BUILD THE HTML OF AN INTERFACE PANEL
 // ============================================================
 function buildPanelHTML(name, info){
   var s    = sid(name);
@@ -1790,7 +1908,7 @@ function buildPanelHTML(name, info){
     '<div class="si"><span class="sl">&#128246;</span>' +
     '<span class="sv sn" title="'+escH(desc)+'">'+escH(name)+'</span></div>' +
     '<div class="sp"></div>' +
-    '<div class="si"><span class="sl">Lien</span>' +
+    '<div class="si"><span class="sl">Link</span>' +
     '<span class="sv sn" id="link_'+s+'">'+escH(link)+'</span></div>' +
     '<div class="sp"></div>' +
     '<div class="si"><span class="sl">&#8595; IN</span>' +
@@ -1805,22 +1923,22 @@ function buildPanelHTML(name, info){
     '<div class="si"><span class="sl">Max&#8593;</span>' +
     '<span class="sv sout" id="maxOut_'+s+'">--</span></div>' +
     '<div class="sp"></div>' +
-    '<div class="si"><span class="sl">Moy&#8595;</span>' +
+    '<div class="si"><span class="sl">Avg&#8595;</span>' +
     '<span class="sv sin" id="avgIn_'+s+'">--</span></div>' +
     '<div class="sp"></div>' +
-    '<div class="si"><span class="sl">Moy&#8593;</span>' +
+    '<div class="si"><span class="sl">Avg&#8593;</span>' +
     '<span class="sv sout" id="avgOut_'+s+'">--</span></div>' +
     '<div class="sp"></div>' +
     '<div class="si"><span class="sl">Pts</span>' +
     '<span class="sv sn" id="pts_'+s+'">0</span></div>' +
     '</div>';
 
-  // ── Tabs niveau 2 (vues temporelles) ─────────────────────
+  // -- Level 2 tabs (time views) ---------------------------
   var esc = function(n){ return n.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); };
   var tabs2 =
     '<div class="tabs2">' +
     '<div class="t2btn t2all a" id="t2all_'+s+'"' +
-    ' onclick="selectView(\''+s+'\',\'all\',\''+esc(name)+'\')">&#9706; Tous</div>';
+    ' onclick="selectView(\''+s+'\',\'all\',\''+esc(name)+'\')">&#9706; All</div>';
   VIEWS.forEach(function(vk){
     tabs2 +=
       '<div class="t2btn" id="t2'+vk+'_'+s+'" title="'+VLT[vk]+'"' +
@@ -1828,7 +1946,7 @@ function buildPanelHTML(name, info){
   });
   tabs2 += '</div>';
 
-  // ── Zone graphiques : vue "Tous" (2×2) + vues individuelles ─
+  // -- Chart area: "All" view (2x2) + individual views -
   var gcont = '<div class="gcont"><div class="gall a" id="gall_'+s+'">';
   VIEWS.forEach(function(vk){
     gcont +=
@@ -1849,8 +1967,8 @@ function buildPanelHTML(name, info){
 }
 
 // ============================================================
-// INITIALISATION DES CHARTS D'UNE INTERFACE
-// 2 charts par vue (all = compact, single = pleine largeur)
+// CHART INITIALIZATION FOR AN INTERFACE
+// 2 charts per view (all = compact, single = full width)
 // ============================================================
 function initChartsForIface(name){
   var s = sid(name);
@@ -1863,7 +1981,7 @@ function initChartsForIface(name){
 }
 
 // ============================================================
-// SÉLECTION D'UNE INTERFACE (tab niveau 1)
+// SELECT AN INTERFACE (level 1 tab)
 // ============================================================
 function selectIface(name){
   curIface = name;
@@ -1877,16 +1995,16 @@ function selectIface(name){
 }
 
 // ============================================================
-// SÉLECTION D'UNE VUE TEMPORELLE (tab niveau 2)
+// SELECT A TIME VIEW (level 2 tab)
 // ============================================================
 function selectView(s, vk, name){
-  // Met à jour les classes des tabs niveau 2
+  // Update the level 2 tab classes
   ['all'].concat(VIEWS).forEach(function(v){
     var tb = document.getElementById('t2'+v+'_'+s);
     if(!tb) return;
     tb.className = 't2btn' + (v==='all'?' t2all':'') + (v===vk?' a':'');
   });
-  // Affiche/masque les zones graphiques
+  // Show/hide the chart areas
   var ga = document.getElementById('gall_'+s);
   if(ga) ga.className = 'gall' + (vk==='all'?' a':'');
   VIEWS.forEach(function(v){
@@ -1898,8 +2016,8 @@ function selectView(s, vk, name){
 }
 
 // ============================================================
-// MISE À JOUR DES CHARTS D'UNE INTERFACE
-// Appelée à chaque cycle de 2s et après chaque interaction UI
+// UPDATE THE CHARTS OF AN INTERFACE
+// Called on each 2s cycle and after every UI interaction
 // ============================================================
 function updateChartsForIface(name){
   if(!MD || !MD.ifaces) return;
@@ -1907,9 +2025,9 @@ function updateChartsForIface(name){
   var d = MD.ifaces[name];
   if(!d) return;
 
-  // ── PASSE 1 : calcul des maxima ──────────────────────────
-  // globalMax    = max sur les 4 vues  → échelle COMMUNE de la grille
-  // viewMax[vk]  = max de chaque vue   → échelle propre de la vue plein écran
+  // -- PASS 1: compute the maxima -------------------------
+  // globalMax    = max over the 4 views -> COMMON grid scale
+  // viewMax[vk]  = max of each view   -> own scale of the full-screen view
   var globalMax = 0;
   var viewMax   = {};
   VIEWS.forEach(function(vk){
@@ -1926,22 +2044,22 @@ function updateChartsForIface(name){
     if(m > globalMax) globalMax = m;
   });
 
-  // ✅ v1.9 : le seuil POUSSE l'échelle (mode auto) afin que la ligne
-  //    d'alarme soit toujours visible. La même échelle imposée aux
-  //    4 cellules garantit qu'elle apparaît simultanément partout.
+  // v1.9: the threshold PUSHES the scale (auto mode) so the line
+  //    alarm is always visible. The same scale imposed on the
+  //    4 cells ensures it appears everywhere simultaneously.
   var thrPush = (thrEnabled && thrVal > 0) ? thrVal : 0;
 
-  // Échelle COMMUNE des 4 cellules « Tous » → MÊME hauteur en Mbps
+  // COMMON scale of the 4 "All" cells -> SAME height in Mbps
   var gridYMax = calcYMax(Math.max(globalMax, thrPush));
 
-  // ── PASSE 2 : rendu de chaque vue ────────────────────────
+  // -- PASS 2: render each view ----------------------------
   VIEWS.forEach(function(vk){
     var vd = d[vk];
     var inD = [], outD = [];
     var mxI = 0, mxO = 0;
 
-    // Extraction → points {x:timestamp(ms), y:valeur}
-    // ✅ v1.15 : l'abscisse porte le temps réel (positionnement exact).
+    // Extraction -> points {x:timestamp(ms), y:value}
+    // v1.15: the x value carries real time (exact positioning).
     if(vd && vd.length > 0){
       vd.forEach(function(pt){
         var tx = parseFloat(pt.t);
@@ -1953,17 +2071,17 @@ function updateChartsForIface(name){
       });
     }
 
-    // Échelle de la vue plein écran : son propre maximum + le seuil
+    // Full-screen view scale: its own maximum + the threshold
     var singleYMax = calcYMax(Math.max(viewMax[vk], thrPush));
 
-    // Stats mini dans l'entête de la cellule (vue "Tous")
+    // Mini stats in the cell header ("All" view)
     var csEl = document.getElementById('cs_'+s+'_'+vk);
     if(csEl){
       csEl.textContent = '\u2193'+fmb(mxI)+' \u2191'+fmb(mxO);
     }
 
-    // ✅ FIX TAILLE DES POINTS (v1.8) :
-    // Chart.js v4 exige un TABLEAU de valeurs par point
+    // POINT SIZE FIX (v1.8):
+    // Chart.js v4 requires an ARRAY of per-point values
     var n    = inD.length;
     var pts  = new Array(n);
     var ptsH = new Array(n);
@@ -1972,13 +2090,13 @@ function updateChartsForIface(name){
       ptsH[k] = ptSize + 2;
     }
 
-    // Mise à jour des 2 charts (all + single)
+    // Update the 2 charts (all + single)
     ['all','single'].forEach(function(sf){
       var ch = charts[s+'_'+vk+'_'+sf];
       if(!ch) return;
-      var cp = (sf === 'all');  // compact = vue grille
+      var cp = (sf === 'all');  // compact = grid view
 
-      // Données ({x,y}) — l'axe X est temporel, pas de labels catégorie
+      // Data ({x,y}) - the X axis is time-based, no category labels
       ch.data.labels = [];
 
       ch.data.datasets[0].data            = inD;
@@ -1995,38 +2113,38 @@ function updateChartsForIface(name){
       ch.data.datasets[1].pointRadius      = pts;
       ch.data.datasets[1].pointHoverRadius = ptsH;
 
-      // Options d'affichage (couleurs axes, thème, police lisible)
+      // Display options (axis colors, theme, readable font)
       ch.options.scales.x.ticks.color         = gcs('--tick');
-      // ✅ v1.16 : le nombre de graduations est désormais imposé à 6
-      //    segments (7 ticks) par afterBuildTicks dans makeChart() —
-      //    plus de maxTicksLimit variable selon la vue.
-      // ✅ v1.11 : heures à la même taille que les débits (axe Y)
+      // v1.16: the number of ticks is now imposed to 6
+      //    segments (7 ticks) by afterBuildTicks in makeChart() -
+      //    no more maxTicksLimit varying by view.
+      // v1.11: hours at the same size as the rates (Y axis)
       ch.options.scales.x.ticks.font.size     = cp ? 9 : 12;
       ch.options.scales.x.grid.color          = gcs('--grid');
 
-      // ✅ v1.15 : domaine X FIXE = [maintenant − fenêtre ; maintenant]
-      //   → les données occupent leur zone temporelle exacte. Un
-      //   historique partiel laisse la partie gauche vide au lieu d'être
-      //   étiré sur toute la largeur.
+      // v1.15: FIXED X domain = [now - window ; now]
+      //   -> data occupies its exact time area. A
+      //   partial history leaves the left part empty instead of being
+      //   stretched across the whole width.
       var winMs = VWIN[vk];
       var tMax  = Date.now();
       if(vd && vd.length){
         var lastT = parseFloat(vd[vd.length-1].t);
-        if(lastT > tMax) tMax = lastT;   // garde-fou si horloge décalée
+        if(lastT > tMax) tMax = lastT;   // safeguard if the clock is skewed
       }
       ch.options.scales.x.min = tMax - winMs;
       ch.options.scales.x.max = tMax;
-      ch.config._view = vk;   // utilisé par le callback de formatage X
+      ch.config._view = vk;   // used by the X formatting callback
       ch.options.scales.y.ticks.color         = gcs('--tickY');
-      // ✅ v1.9 : police Y agrandie + moins de graduations
+      // v1.9 : police Y agrandie + moins de graduations
       ch.options.scales.y.ticks.font.size     = cp ? 9 : 12;
       ch.options.scales.y.ticks.maxTicksLimit = cp ? 5 : 7;
       ch.options.scales.y.grid.color          = gcs('--grid2');
 
-      // ✅ v1.9 : échelle Y commune (grille) ou propre (plein écran)
+      // v1.9: common Y scale (grid) or own (full screen)
       ch.options.scales.y.max = cp ? gridYMax : singleYMax;
 
-      // Transmission de l'état seuil + mode compact aux plugins
+      // Pass the threshold state + compact mode to the plugins
       ch.config._thr     = { alert: thrVal, enabled: thrEnabled };
       ch.config._compact = cp;
 
@@ -2036,7 +2154,7 @@ function updateChartsForIface(name){
 }
 
 // ============================================================
-// REDESSINER TOUS LES CHARTS (après changement de thème, etc.)
+// REDRAW ALL CHARTS (after theme change, etc.)
 // ============================================================
 function redrawAll(){
   if(!MD || !MD.ifaces) return;
@@ -2044,7 +2162,7 @@ function redrawAll(){
 }
 
 // ============================================================
-// MISE À JOUR DE LA BARRE DE STATS (valeurs numériques)
+// UPDATE THE STATS BAR (numeric values)
 // ============================================================
 function updateStats(name, d){
   var s = sid(name);
@@ -2060,8 +2178,8 @@ function updateStats(name, d){
 
 // ============================================================
 // EXPORT SNAPSHOT HTML
-// Génère un HTML autonome avec Chart.js et données embarqués
-// Téléchargé dans le navigateur avec horodatage
+// Generates a standalone HTML with embedded Chart.js and data
+// Downloaded in the browser with a timestamp
 // ============================================================
 function exportSnapshot(){
   if(!MD) return;
@@ -2072,7 +2190,7 @@ function exportSnapshot(){
             ('0'+now.getHours()).slice(-2) + 'h' +
             ('0'+now.getMinutes()).slice(-2);
 
-  // Couleurs selon le thème courant
+  // Colors based on the current theme
   var bg     = darkMode ? '#1a1a2e' : '#f0f4f8';
   var tx     = darkMode ? '#e0e0e0' : '#0f1923';
   var sf     = darkMode ? '#16213e' : '#ffffff';
@@ -2083,7 +2201,7 @@ function exportSnapshot(){
   var outF   = darkMode ? 'rgba(76,201,240,.10)' : 'rgba(0,99,190,.08)';
   var titleC = darkMode ? '#4cc9f0' : '#0063be';
 
-  // Récupération du code Chart.js embarqué dans la page
+  // Retrieve the Chart.js code embedded in the page
   var chartSrc = '';
   try{
     var sc = document.getElementsByTagName('script');
@@ -2092,9 +2210,9 @@ function exportSnapshot(){
     }
   }catch(e){}
 
-  var nowStr = new Date().toLocaleString('fr-FR');
+  var nowStr = new Date().toLocaleString('en-US');
 
-  // Construction du HTML du snapshot
+  // Build the snapshot HTML
   var html =
     '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
     '<title>PS-MRTG Snapshot ' + ts + '</title>' +
@@ -2113,7 +2231,7 @@ function exportSnapshot(){
     '<h2>&#128247; PS-MRTG Snapshot</h2>' +
     '<div class="sub">' + nowStr + ' &mdash; ' + escH(MD.dur||'') + '</div>' +
     '<div class="grid" id="g"></div>' +
-    // Script de rendu des graphiques snapshot
+    // Snapshot chart rendering script
     '<script>var D=' + JSON.stringify(MD) + ';' +
     'var ST=[10,100,1000,10000,100000,200000];' +
     'function fmb(v){v=parseFloat(v);if(isNaN(v)||v<0)return"--";' +
@@ -2163,7 +2281,7 @@ function exportSnapshot(){
     '});});' +
     '<\/script></body></html>';
 
-  // Téléchargement du snapshot
+  // Download the snapshot
   var blob = new Blob([html], {type:'text/html;charset=utf-8'});
   var url  = URL.createObjectURL(blob);
   var a    = document.createElement('a');
@@ -2174,11 +2292,11 @@ function exportSnapshot(){
 }
 
 // ============================================================
-// CHARGEMENT DES DONNÉES (cycle de 2s)
-// Recharge network_data.js qui définit window.MD
+// DATA LOADING (2s cycle)
+// Reloads network_data.js which defines window.MD
 // ============================================================
 function loadData(){
-  // Suppression du script précédent pour forcer le rechargement
+  // Remove the previous script to force a reload
   var old = document.getElementById('_mds');
   if(old && old.parentNode) old.parentNode.removeChild(old);
 
@@ -2190,14 +2308,14 @@ function loadData(){
     if(!window.MD) return;
     MD = window.MD;
 
-    // ✅ INIT UNIQUE depuis PS — jamais écrasé ensuite
-    // thrEnabled, thrVal, yScaleMode : contrôlés par l'UI après init
+    // ONE-TIME INIT from PS - never overwritten afterwards
+    // thrEnabled, thrVal, yScaleMode: controlled by the UI after init
     if(!uiInitDone){
       thrVal     = MD.threshold     || thrVal;
       thrEnabled = (MD.thresholdEnabled !== undefined)
                     ? MD.thresholdEnabled : thrEnabled;
       if(MD.yScaleMode !== undefined) yScaleMode = String(MD.yScaleMode);
-      // Synchronisation des contrôles visuels
+      // Synchronize the visual controls
       var cb = document.getElementById('thrEnabled');
       if(cb) cb.checked = thrEnabled;
       var ti = document.getElementById('thrInput');
@@ -2208,11 +2326,11 @@ function loadData(){
       uiInitDone = true;
     }
 
-    // Mise à jour header (heure + durée)
+    // Update header (time + duration)
     sel('durLbl', MD.dur || '--');
     sel('nowLbl', MD.now || '--:--:--');
 
-    // Reconstruction des panels si les interfaces ont changé
+    // Rebuild panels if the interfaces have changed
     var ni = Object.keys(MD.ifaces);
     if(!initialized ||
        JSON.stringify(ni.slice().sort()) !==
@@ -2220,7 +2338,7 @@ function loadData(){
       initPanels(MD.ifaces);
     }
 
-    // Mise à jour stats + graphiques pour chaque interface
+    // Update stats + charts for each interface
     ni.forEach(function(name){
       if(MD.ifaces[name]){
         updateStats(name, MD.ifaces[name]);
@@ -2233,7 +2351,7 @@ function loadData(){
   document.head.appendChild(s);
 }
 
-// Démarrage : premier chargement puis cycle de 2s
+// Startup: first load then 2s cycle
 loadData();
 setInterval(loadData, 2000);
 </script>
@@ -2248,46 +2366,46 @@ setInterval(loadData, 2000);
 }
 
 # ============================================================
-# SECTION 19 — POINT D'ENTRÉE PRINCIPAL
+# SECTION 19 - MAIN ENTRY POINT
 # ============================================================
 $script:startMs = Get-NowMs
 
-# Bannière de démarrage
+# Startup banner
 Write-Host ""
 Write-Host "  Mode : $($ExecutionContext.SessionState.LanguageMode)" -ForegroundColor Cyan
 Write-Host "  =============================================" -ForegroundColor Cyan
-Write-Host "   PS-MRTG v1.16 — MRTG Bandwidth Monitor"                -ForegroundColor White
-Write-Host "   Bande passante reseau — temps reel"          -ForegroundColor Yellow
-Write-Host "   Intervalle : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
-Write-Host "   Echelle Y  : $YScaleMode"                    -ForegroundColor Yellow
-Write-Host "   Threshold  : $ThresholdAlertMbps Mbps (actif:$ThresholdEnabled)" `
+Write-Host "   PS-MRTG v1.20 - MRTG Bandwidth Monitor"                  -ForegroundColor White
+Write-Host "   Network bandwidth - real time"          -ForegroundColor Yellow
+Write-Host "   Interval   : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
+Write-Host "   Y scale  : $YScaleMode"                    -ForegroundColor Yellow
+Write-Host "   Threshold  : $ThresholdAlertMbps Mbps (active:$ThresholdEnabled)" `
            -ForegroundColor Yellow
-Write-Host "   Rapport    : $htmlFile"                      -ForegroundColor Gray
-Write-Host "   Arret      : Ctrl+C"                         -ForegroundColor Red
+Write-Host "   Report     : $htmlFile"                      -ForegroundColor Gray
+Write-Host "   Stop       : Ctrl+C"                         -ForegroundColor Red
 Write-Host "  =============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Détection des interfaces ─────────────────────────────────
-Write-Host "  Detection interfaces actives..." -ForegroundColor Cyan
+# -- Interface detection --------------------------------------
+Write-Host "  Detecting active interfaces..." -ForegroundColor Cyan
 $script:ActiveIfaces = Get-ActiveInterfaces
 if ($script:ActiveIfaces.Count -eq 0) {
-    Write-Host "  ATTENTION : Aucune interface detectee !" -ForegroundColor Red
+    Write-Host "  WARNING : No interface detected !" -ForegroundColor Red
 } else {
-    Write-Host "  $($script:ActiveIfaces.Count) interface(s) detectee(s)." `
+    Write-Host "  $($script:ActiveIfaces.Count) interface(s) detected." `
                -ForegroundColor Green
 }
 Write-Host ""
 
-# ── Initialisation des buffers ───────────────────────────────
+# -- Buffer initialization -----------------------------------
 foreach ($ifName in $script:ActiveIfaces.Keys) {
     Init-InterfaceBuffers -Name $ifName
 }
 
-# ── Debug compteurs (affiché une seule fois au démarrage) ────
+# -- Counter debug (shown once at startup) --------------------
 Debug-Counters
 
-# ── Initialisation des compteurs bruts (premier sondage) ────
-Write-Host "  Init compteurs..." -ForegroundColor Cyan
+# -- Raw counter initialization (first poll) ----------------
+Write-Host "  Initializing counters..." -ForegroundColor Cyan
 $initCounters = Get-NetworkCounters
 $initMs       = Get-NowMs
 foreach ($ifName in $script:interfaces.Keys) {
@@ -2298,46 +2416,82 @@ foreach ($ifName in $script:interfaces.Keys) {
         $script:rawCounters[$ifName].LastIn  = [long]$initCounters[$cKey].BytesIn
         $script:rawCounters[$ifName].LastOut = [long]$initCounters[$cKey].BytesOut
         $script:rawCounters[$ifName].LastTs  = $initMs
-        Write-Host "  Init OK : '$ifName' → '$cKey'" -ForegroundColor Green
+        Write-Host "  Init OK : '$ifName' -> '$cKey'" -ForegroundColor Green
     } else {
-        Write-Host "  Init FAIL : '$ifName' — compteur introuvable" -ForegroundColor Red
+        Write-Host "  Init FAIL : '$ifName' - counter not found" -ForegroundColor Red
     }
 }
 Write-Host ""
 
-# ── Génération HTML + premier write data.js ──────────────────
+# -- HTML generation + first data.js write --------------------
 Write-HtmlOnce
 Write-DataJs
 
-# ── Ouverture du navigateur ──────────────────────────────────
-Open-Browser -FilePath $htmlFile
-Write-Host "  Navigateur ouvert." -ForegroundColor Green
-Write-Host "  Ctrl+C pour arreter." -ForegroundColor Gray
+# -- Open the browser -----------------------------------------
+$script:browserProc = Open-Browser -FilePath $htmlFile
+Write-Host "  Browser opened." -ForegroundColor Green
+if ($script:browserProc) {
+    Write-Host "  Auto-stop : active (close the window to stop)" -ForegroundColor Gray
+} else {
+    Write-Host "  Auto-stop : inactive (browser not monitorable)" -ForegroundColor Gray
+}
+Write-Host "  Ctrl+C to stop." -ForegroundColor Gray
 Write-Host ""
 
 # ── Boucle principale ────────────────────────────────────────
 $lastWrite   = Get-Date
 $lastCollect = Get-Date
+$lastAlive   = Get-Date
+$startWatch  = Get-Date
+$AliveEvery  = 5     # seconds between two window checks
+$WatchGrace  = 30    # grace period (s): no auto-stop while the browser settles
+$wasAlive    = $false  # true once the browser process is confirmed running
+$exitStreak  = 0     # consecutive HasExited readings (need 2 to actually stop)
 
 try {
     while ($true) {
+
+        # --- Window watch (auto-stop), hardened v1.20 ---
+        # Only stop if the browser process was confirmed ALIVE at least once
+        # (after a grace period) AND has then exited on 2 consecutive checks.
+        # This prevents a launcher hand-off (the spawned process exits
+        # immediately) from killing the hidden PowerShell and freezing the
+        # data. If the process is never seen alive, auto-stop disables itself
+        # and data keeps flowing (close the window or Ctrl+C to stop).
+        if ($script:browserProc -and ((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
+            if (((Get-Date) - $lastAlive).TotalSeconds -ge $AliveEvery) {
+                $lastAlive = Get-Date
+                $exited = $true
+                try { $exited = [bool]$script:browserProc.HasExited } catch { $exited = $true }
+                if (-not $exited) {
+                    $wasAlive = $true; $exitStreak = 0
+                } elseif ($wasAlive) {
+                    $exitStreak++
+                    if ($exitStreak -ge 2) {
+                        Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
+                        break
+                    }
+                }
+            }
+        }
+
         $now = Get-Date
 
-        # Lecture des commandes du browser (threshold, yScale)
+        # Read browser commands (threshold, yScale)
         Read-CmdFile
 
-        # Collecte de la bande passante (toutes les $IntervalSec s)
+        # Collect bandwidth (every $IntervalSec s)
         if (($now - $lastCollect).TotalSeconds -ge $IntervalSec) {
             Collect-Bandwidth
             $lastCollect = $now
         }
 
-        # Écriture de network_data.js (toutes les $WriteEvery s)
+        # Write network_data.js (every $WriteEvery s)
         if (($now - $lastWrite).TotalSeconds -ge $WriteEvery) {
             Write-DataJs
             $lastWrite = $now
 
-            # Log console : durée + débits courants par interface
+            # Console log: duration + current rates per interface
             $elapsed = Get-ElapsedSec
             $hh = [int]($elapsed / 3600)
             $mm = [int](($elapsed % 3600) / 60)
@@ -2351,16 +2505,17 @@ try {
                 $hh, $mm, $ss, ($parts -join "   |   ")) -ForegroundColor Cyan
         }
 
-        # Pause courte pour ne pas saturer le CPU
+        # Short pause to avoid saturating the CPU
         Start-Sleep -Milliseconds 200
     }
 }
 finally {
-    # Bloc exécuté même sur Ctrl+C
+    # Block executed even on Ctrl+C
     Write-Host ""
-    Write-Host "  Arret PS-MRTG..." -ForegroundColor Yellow
-    Write-DataJs   # Dernier flush des données
-    Write-Host "  Rapport final : $htmlFile" -ForegroundColor Gray
-    Write-Host "  Arrete." -ForegroundColor Green
+    Write-Host "  Stopping PS-MRTG..." -ForegroundColor Yellow
+    Write-DataJs   # Final data flush
+    Write-Host "  Final report : $htmlFile" -ForegroundColor Gray
+    Write-Host "  Stopped." -ForegroundColor Green
     Write-Host ""
+    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 }
