@@ -1,6 +1,6 @@
 # ============================================================
-# SCRIPT  : PS-MRTG — Network Bandwidth Monitor
-# VERSION : 1.22
+# SCRIPT  : PS-MRTG - Network Bandwidth Monitor
+# VERSION : 1.27
 # AUTEUR  : Eric Guiffault
 # DATE    : 2026-05
 #
@@ -9,6 +9,60 @@
 #   Classic MRTG style - 4 aggregated time views.
 #   Interactive HTML interface - 100% offline.
 #   Compatible with strict ConstrainedLanguage (PS 5.1 + PS 7+).
+#
+# CHANGELOG v1.27 :
+#   - Readability: font sizes increased across the whole UI (header,
+#     tabs, stats bar, legend, Options panel) and on the charts
+#     (axis ticks 9->11 compact / 12->14 full screen, tooltips 13px,
+#     snapshot axes 12px).
+#   - NEW: Unit selector in Options - display throughput either in
+#     bits/s (Kbps/Mbps/Gbps, default) or in bytes/s (KB/s, MB/s,
+#     GB/s). Pure display conversion (Mbps / 8); data, threshold and
+#     Y-scale settings remain in Mbps. Applies to axes, tooltips,
+#     stats bar, Y badge and the HTML snapshot.
+#
+# CHANGELOG v1.26 :
+#   - FIX parse crash: an em dash (U+2014) remained in a Write-Host
+#     string. If the file loses its UTF-8 BOM (copy/paste, editor
+#     re-save), PowerShell 5.1 reads it as ANSI and the dash bytes turn
+#     into a smart quote that TERMINATES the string -> parser explosion.
+#   - The whole file is now 100% ASCII (em dashes, box-drawing lines and
+#     middle dots replaced). Encoding can no longer break anything:
+#     the script parses identically with or without BOM.
+#
+# CHANGELOG v1.25 :
+#   - FIX translate popup: the page declared <html lang="fr"> (missed by
+#     the v1.19 translation), so Edge offered to translate from French.
+#     Now lang="en" + translate="no" + <meta name="google"
+#     content="notranslate"> (dashboard AND snapshot), plus --lang=en-US.
+#   - FIX slow window opening: the browser profile is now STABLE and
+#     reused across runs instead of being recreated per launch, which
+#     forced a multi-second first-run initialization every time.
+#
+# CHANGELOG v1.24 :
+#   - Two DECOUPLED stop mechanisms (the smart bit):
+#     (A) Relaunch -> instant lock handover. Each instance re-reads
+#         instance.lock every ~5s; if a newer instance claimed it, the
+#         old one steps down immediately, hands-off (no data flush, no
+#         browser kill). Relaunches NEVER overlap, regardless of how
+#         long the close-confirmation is.
+#     (B) Window closed -> coupled signals (title AND profile AND
+#         handle must ALL be negative) sustained for ~60s (12 checks)
+#         before stopping. False kill while the window is open is
+#         practically impossible; the 60s delay costs nothing since
+#         relaunches are handled instantly by (A).
+#   - Startup takeover is graceful-first: claim lock, close the old
+#     browser, wait up to 8s for the old instance to step down, only
+#     then force-stop it as a last resort.
+#
+# CHANGELOG v1.23 :
+#   - FIX false auto-stop: the background PowerShell could stop while the
+#     dashboard window was still open, freezing the graph. Window
+#     detection now combines three signals (browser window TITLE, our
+#     dedicated profile dir, and the spawned process handle) and only
+#     concludes "closed" when ALL agree. The window must also stay
+#     absent ~30s (6 consecutive checks) before stopping, so a transient
+#     reading can never kill the monitoring. Safe direction = stay open.
 #
 # CHANGELOG v1.22 :
 #   - FIX auto-stop: the window is now detected via ANY browser process
@@ -78,7 +132,7 @@
 #
 # CHANGELOG v1.14 :
 #   - Each chart shows its PERIOD (look-back) next to its type:
-#     Live (5s) · 1h / 6h (30s) / 2.5j (5min) / 15j (30min).
+#     Live (5s) . 1h / 6h (30s) / 2.5j (5min) / 15j (30min).
 #   - Fix: the "Recent" view covers 6h (not 1h as displayed).
 #   - Hover tooltip: full explanation of each view's look-back.
 #
@@ -125,7 +179,7 @@
 #   Day   : 1 pt / 5min  -> 720 x 5min  = 3 600 min = 60 h = 2.5 d (avg. 60 pts)
 #   Week  : 1 pt / 30min -> 720 x 30min = 21 600 min = 360 h = 15 d (avg. 360 pts)
 #
-# INSTALLATION OFFLINE — Chart.js :
+# INSTALLATION OFFLINE - Chart.js :
 #   Download: chart.js@4.4.0/dist/chart.umd.min.js
 #   Copy to: %USERPROFILE%\Documents\chartjs.min.js
 #             or: %TEMP%\PSMrtg\chartjs.min.js
@@ -193,7 +247,7 @@ if ($Host.Name -eq "Windows PowerShell ISE Host") {
 }
 
 # ============================================================
-# SECTION 1 — CONFIGURATION UTILISATEUR
+# SECTION 1 - CONFIGURATION UTILISATEUR
 # All editable settings are here
 # ============================================================
 
@@ -221,7 +275,7 @@ $IntervalSec = 5
 $WriteEvery  = 2
 
 # ============================================================
-# SECTION 2 — CHEMINS DE FICHIERS
+# SECTION 2 - CHEMINS DE FICHIERS
 # ============================================================
 
 # Dossier de travail temporaire
@@ -250,38 +304,65 @@ $cmdFile  = "$scriptTemp\mrtg_cmd.js"
 # Dedicated browser profile (--app mode): isolates the Edge/Chrome instance and
 # creates a CLEAN, monitorable process, for auto-stop on closing
 # the window. Unique per run (PID) -> no stale cache reuse.
-$profileDir = "$scriptTemp\browser_profile_$PID"
+# v1.25: STABLE profile dir, reused across runs. A fresh per-run profile
+# forced Edge/Chrome through full first-run initialization at every launch
+# (several seconds): reusing the profile makes the window open much faster
+# and keeps the cache. One-time cleanup of old per-PID profiles below.
+$profileDir = "$scriptTemp\browser_profile"
 Remove-Item -Path "$scriptTemp\browser_profile_*" -Recurse -Force -ErrorAction SilentlyContinue
+if (-not (Test-Path $profileDir)) {
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+}
 
-# --- Single instance (v1.22) --------------------------------------
+# --- Single instance (v1.24): graceful lock takeover ----------------
 # Two overlapping runs would both write network_data.js and the graphs
-# would "double up". On startup we stop any previous PS-MRTG instance
-# (recorded in a lock file) and its orphaned browser, then claim the lock.
+# would "double up". Takeover protocol:
+#   1. Read the previous owner (PID + its browser profile) from the lock.
+#   2. Claim the lock IMMEDIATELY with our PID. The previous instance
+#      re-reads the lock every ~5s and steps down by itself, hands-off
+#      (graceful handover -- see the watch loop).
+#   3. Close the previous run's browser window (old profile dir).
+#   4. Belt-and-braces: if the old PowerShell still exists after a short
+#      wait (crashed loop, suspended process...), force-stop it.
 $lockFile = "$scriptTemp\instance.lock"
+$prevPid = 0; $prevProfile = ""
 if (Test-Path $lockFile) {
     try {
-        $old        = (Get-Content -Path $lockFile -ErrorAction Stop) -split '\|'
-        $oldPid     = [int]$old[0]
-        $oldProfile = if ($old.Count -gt 1) { $old[1] } else { "" }
-        if ($oldPid -and $oldPid -ne $PID) {
-            $op = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-            if ($op -and ($op.ProcessName -eq 'powershell' -or $op.ProcessName -eq 'pwsh')) {
-                Write-Host "  Stopping previous PS-MRTG instance (PID $oldPid)..." -ForegroundColor Yellow
-                Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-            }
-        }
-        # Kill the previous run's orphaned browser (matched by its profile dir)
-        if ($oldProfile) {
-            try {
-                Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
-                    Where-Object { $_.CommandLine -like "*$oldProfile*" } |
-                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-            } catch { }
-        }
+        $old = (Get-Content -Path $lockFile -ErrorAction Stop | Select-Object -First 1) -split '\|'
+        $prevPid     = [int]$old[0]
+        $prevProfile = if ($old.Count -gt 1) { $old[1] } else { "" }
     } catch { }
 }
 # Claim the lock for this instance (PID + our profile dir)
 "$PID|$profileDir" | Set-Content -Path $lockFile -Encoding ASCII -ErrorAction SilentlyContinue
+
+if ($prevPid -and $prevPid -ne $PID) {
+    # Close the previous run's browser window (matched by its profile dir)
+    if ($prevProfile) {
+        try {
+            Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*$prevProfile*" } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } catch { }
+    }
+    # Give the old instance up to ~8s to step down on its own (it checks
+    # the lock every ~5s), then force-stop it only if it is still there.
+    $op = Get-Process -Id $prevPid -ErrorAction SilentlyContinue
+    if ($op -and ($op.ProcessName -eq 'powershell' -or $op.ProcessName -eq 'pwsh')) {
+        Write-Host "  Previous PS-MRTG instance (PID $prevPid) - waiting for graceful handover..." -ForegroundColor Yellow
+        $hw = 0
+        while ($hw -lt 8) {
+            Start-Sleep -Seconds 1; $hw++
+            if (-not (Get-Process -Id $prevPid -ErrorAction SilentlyContinue)) { break }
+        }
+        if (Get-Process -Id $prevPid -ErrorAction SilentlyContinue) {
+            Write-Host "  No handover - force-stopping previous instance (PID $prevPid)." -ForegroundColor Yellow
+            Stop-Process -Id $prevPid -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  Previous instance stepped down cleanly." -ForegroundColor Green
+        }
+    }
+}
 
 # ============================================================
 # SECTION 3 - GLOBAL SCRIPT VARIABLES
@@ -307,7 +388,7 @@ $script:ActiveIfaces = @{}
 $script:debugDone    = $false
 
 # ============================================================
-# SECTION 4 — FONCTIONS UTILITAIRES
+# SECTION 4 - FONCTIONS UTILITAIRES
 # Compatible ConstrainedLanguage strict (pas de [math]::)
 # ============================================================
 
@@ -1023,7 +1104,7 @@ function Read-CmdFile {
 }
 
 # ============================================================
-# SECTION 16 — CHARGEMENT DE CHART.JS (OFFLINE)
+# SECTION 16 - CHARGEMENT DE CHART.JS (OFFLINE)
 # Look for chartjs.min.js in several local locations
 # Fallback: attempt CDN download
 # ============================================================
@@ -1042,7 +1123,7 @@ function Get-ChartJsTag {
         if (Test-Path $c) {
             $src = Get-Content -Path $c -Raw -ErrorAction SilentlyContinue
             if ($src -and $src.Length -gt 10000) {
-                Write-Host "  Chart.js : OK — $c ($([int]($src.Length/1024)) KB)" `
+                Write-Host "  Chart.js : OK - $c ($([int]($src.Length/1024)) KB)" `
                            -ForegroundColor Green
                 # Copy to the working folder if needed
                 if ($c -ne "$scriptTemp\chartjs.min.js") {
@@ -1107,6 +1188,7 @@ function Open-Browser {
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-sync",
+            "--lang=en-US",
             "--disable-features=msEdgeSyncBubble,msImplicitSignin,Translate,TranslateUI,msTranslateBubble"
         )
         try {
@@ -1137,13 +1219,30 @@ function Open-Browser {
 # Fallback (if CIM/WMI is unavailable): the spawned process handle.
 function Test-BrowserOpen {
     param([string]$ProfileDir)
+    # Returns $true if ANY signal says the dashboard window is open. Only
+    # returns $false when ALL signals agree it is gone, so a single flaky
+    # reading can never trigger a false auto-stop (which would silently kill
+    # the monitoring). Erring toward "still open" is the safe direction.
+
+    # Signal 1 (primary, most reliable): a browser window whose TITLE is our
+    # dashboard title. Independent of Chromium's process/command-line model.
+    try {
+        $w = Get-Process -Name msedge, chrome, firefox -ErrorAction SilentlyContinue |
+             Where-Object { $_.MainWindowTitle -like "*MRTG Bandwidth Monitor*" }
+        if ($w) { return $true }
+    } catch { }
+
+    # Signal 2: any browser process using our dedicated --user-data-dir.
     try {
         $hits = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
                 Where-Object { $_.CommandLine -like "*$ProfileDir*" }
-        if ($hits) { return $true } else { return $false }
-    } catch {
-        try { return (-not $script:browserProc.HasExited) } catch { return $true }
-    }
+        if ($hits) { return $true }
+    } catch { }
+
+    # Signal 3 (fallback): the spawned process handle still alive.
+    try { if (-not $script:browserProc.HasExited) { return $true } } catch { }
+
+    return $false
 }
 
 # ============================================================
@@ -1160,11 +1259,12 @@ function Write-HtmlOnce {
 
     $html = @"
 <!DOCTYPE html>
-<html lang="fr" data-theme="dark">
+<html lang="en" translate="no" data-theme="dark">
 <head>
 <meta charset="UTF-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>PS-MRTG v1.22 - MRTG Bandwidth Monitor</title>
+<title>PS-MRTG v1.27 - MRTG Bandwidth Monitor</title>
 $chartJsTag
 <style>
 /* -- CSS variables, dark theme (default) ------------------- */
@@ -1190,7 +1290,7 @@ $chartJsTag
   --cell-bg:#0d1b2a;--cell-bd:#1e3050;
   --opt-bg:#0a1520;--opt-bd:#0f3460;
 }
-/* -- CSS variables, light theme --------------------------── */
+/* -- CSS variables, light theme ---------------------------- */
 [data-theme="light"]{
   --bg:#f0f4f8;--surface:#ffffff;--surface2:#e8edf5;--surface3:#dde4ee;
   --border:#b0c0d8;--border2:#c8d4e8;--border3:#d0dcea;
@@ -1212,40 +1312,40 @@ $chartJsTag
   --cell-bg:#f8fafc;--cell-bd:#c8d4e8;
   --opt-bg:#eef2f8;--opt-bd:#b0c0d8;
 }
-/* ── Reset & base ────────────────────────────────────────── */
+/* -- Reset & base ------------------------------------------ */
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:var(--bg);color:var(--text);
      font-family:'Segoe UI',Consolas,monospace;
      display:flex;flex-direction:column;height:100vh;overflow:hidden;
      transition:background .25s,color .25s}
 
-/* ── Header ──────────────────────────────────────────────── */
+/* -- Header ------------------------------------------------ */
 .hdr{background:var(--surface);padding:6px 16px;
      border-bottom:2px solid var(--border);
      display:flex;align-items:center;justify-content:space-between;
      gap:10px;min-height:42px;flex-shrink:0}
 .hl{display:flex;align-items:center;gap:10px}
-.hdr h1{font-size:1.02em;font-weight:bold;white-space:nowrap}
-.vtag{background:var(--accent2);color:var(--accent);font-size:.7em;
+.hdr h1{font-size:1.15em;font-weight:bold;white-space:nowrap}
+.vtag{background:var(--accent2);color:var(--accent);font-size:.8em;
       padding:2px 7px;border-radius:10px;font-weight:bold}
 .hr2{display:flex;gap:8px;align-items:center;flex-shrink:0}
 /* Blinking dot indicating monitoring activity */
 .hdot{width:8px;height:8px;border-radius:50%;background:var(--ok);
       animation:pl 1.2s infinite;flex-shrink:0}
-.dur{color:var(--warn);font-size:.83em;font-weight:bold;white-space:nowrap}
-.nowt{color:var(--text3);font-size:.8em;white-space:nowrap}
+.dur{color:var(--warn);font-size:.95em;font-weight:bold;white-space:nowrap}
+.nowt{color:var(--text3);font-size:.9em;white-space:nowrap}
 .thbtn{background:transparent;border:1px solid var(--border2);color:var(--text3);
-       font-size:.73em;padding:3px 9px;border-radius:4px;cursor:pointer;white-space:nowrap}
+       font-size:.85em;padding:4px 11px;border-radius:4px;cursor:pointer;white-space:nowrap}
 .thbtn:hover{filter:brightness(1.25)}
 @keyframes pl{0%,100%{opacity:1}50%{opacity:.25}}
 
-/* -- Level 1 tabs: interface selection --------------------── */
+/* -- Level 1 tabs: interface selection ---------------------- */
 .tabs1{background:var(--tab1-bg);border-bottom:2px solid var(--border);
        display:flex;align-items:flex-end;padding:0 12px;
        gap:2px;flex-shrink:0;overflow-x:auto;min-height:36px}
 .tabs1::-webkit-scrollbar{height:3px}
 .tabs1::-webkit-scrollbar-thumb{background:var(--sb-th)}
-.t1btn{padding:7px 15px;font-size:.8em;font-weight:600;color:var(--tab1-c);
+.t1btn{padding:8px 17px;font-size:.95em;font-weight:600;color:var(--tab1-c);
        cursor:pointer;border-radius:6px 6px 0 0;border:1px solid transparent;
        border-bottom:none;white-space:nowrap;transition:all .15s;
        background:transparent;display:flex;align-items:center;gap:6px}
@@ -1260,10 +1360,10 @@ body{background:var(--bg);color:var(--text);
 .iface-panel{display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0}
 .iface-panel.a{display:flex}
 
-/* ── Barre de stats (IN/OUT/Max/Moy) ────────────────────── */
+/* -- Barre de stats (IN/OUT/Max/Moy) ---------------------- */
 .ibar{background:var(--surface2);padding:0 14px;
       border-bottom:1px solid var(--border2);
-      display:flex;align-items:center;font-size:.78em;
+      display:flex;align-items:center;font-size:.9em;
       height:26px;flex-shrink:0;overflow:hidden}
 .sp{width:1px;height:13px;background:var(--border2);margin:0 9px;flex-shrink:0}
 .si{display:flex;gap:3px;align-items:center;flex-shrink:0;white-space:nowrap}
@@ -1274,7 +1374,7 @@ body{background:var(--bg);color:var(--text);
 .tabs2{background:var(--tab2-bg);padding:0 12px;
        display:flex;align-items:center;gap:3px;
        border-bottom:1px solid var(--border2);min-height:32px;flex-shrink:0}
-.t2btn{padding:4px 12px;font-size:.75em;font-weight:600;color:var(--tab2-c);
+.t2btn{padding:5px 14px;font-size:.88em;font-weight:600;color:var(--tab2-c);
        cursor:pointer;border-radius:4px;white-space:nowrap;transition:all .15s;
        border:1px solid transparent;background:transparent}
 .t2btn:hover{color:var(--tab2-act-c);background:var(--surface2)}
@@ -1297,12 +1397,12 @@ body{background:var(--bg);color:var(--text);
        border-radius:5px;padding:6px 8px;
        display:flex;flex-direction:column;overflow:hidden;min-height:0}
 /* Header of a chart cell (label + mini stats) */
-.gclbl{font-size:.7em;font-weight:bold;color:var(--text3);margin-bottom:3px;
+.gclbl{font-size:.84em;font-weight:bold;color:var(--text3);margin-bottom:3px;
        flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
-.gclbl-s{font-size:.85em;color:var(--text4)}
+.gclbl-s{font-size:.95em;color:var(--text4)}
 .gcell canvas{flex:1;min-height:0}
 
-/* -- Footer: snapshot button + Options panel -------------── */
+/* -- Footer: snapshot button + Options panel --------------- */
 .fbar{background:var(--surface);border-top:1px solid var(--border);
       padding:0;display:flex;flex-direction:column;flex-shrink:0}
 .fbar-main{display:flex;align-items:center;gap:10px;
@@ -1312,47 +1412,47 @@ body{background:var(--bg);color:var(--text);
            padding:7px 14px;display:none;flex-wrap:wrap;gap:14px;align-items:center}
 .fbar-opts.open{display:flex}
 .opt-group{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.opt-title{color:var(--text3);font-size:.68em;font-weight:700;
+.opt-title{color:var(--text3);font-size:.8em;font-weight:700;
            text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
 .opt-sep{width:1px;height:22px;background:var(--border2);flex-shrink:0}
 
 /* -- Options panel controls -------------------------------- */
 .ci{display:flex;align-items:center;gap:5px}
-.ci label{color:var(--text3);font-size:.76em;white-space:nowrap}
+.ci label{color:var(--text3);font-size:.88em;white-space:nowrap}
 /* Point size slider */
 .sg{display:flex;align-items:center;gap:5px}
-.sg label{color:var(--text3);font-size:.75em;white-space:nowrap}
-.sg .sv2{color:var(--accent);font-weight:bold;font-size:.78em;min-width:48px}
+.sg label{color:var(--text3);font-size:.88em;white-space:nowrap}
+.sg .sv2{color:var(--accent);font-weight:bold;font-size:.9em;min-width:48px}
 input[type=range]{width:90px;accent-color:var(--accent);cursor:pointer}
 input[type=number]{background:var(--inp-bg);border:1px solid var(--inp-bd);
                    color:var(--accent);padding:3px 7px;border-radius:4px;
-                   font-size:.8em;width:85px;
+                   font-size:.92em;width:95px;
                    font-family:Consolas,monospace;font-weight:bold}
 input[type=number]:focus{outline:2px solid var(--accent)}
 /* Threshold enable checkbox */
 .thr-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;
-            font-size:.76em;color:var(--text2);user-select:none}
+            font-size:.88em;color:var(--text2);user-select:none}
 .thr-toggle input[type=checkbox]{width:14px;height:14px;cursor:pointer;
                                   accent-color:var(--danger)}
 select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accent);
-       padding:3px 6px;border-radius:4px;font-size:.78em;
+       padding:4px 8px;border-radius:4px;font-size:.9em;
        font-family:Consolas,monospace;font-weight:bold;cursor:pointer}
 /* Boutons */
 .btn{padding:4px 11px;border:1px solid var(--border2);border-radius:4px;
-     cursor:pointer;font-size:.76em;font-weight:bold;white-space:nowrap;
+     cursor:pointer;font-size:.88em;font-weight:bold;white-space:nowrap;
      background:var(--btn-bg);color:var(--btn-c);transition:opacity .15s}
 .btn:hover{opacity:.8}
 .btn-opt{background:transparent;border-color:var(--text3);color:var(--text3);
-         font-size:.72em;padding:3px 9px}
+         font-size:.84em;padding:4px 11px}
 .btn-opt:hover{color:var(--accent);border-color:var(--accent);opacity:1}
 .btnsnap{background:var(--btn2-bg);color:var(--btn2-c);border-color:var(--btn2-c)}
 /* Legend IN/OUT/10M/Threshold */
 .leg{display:flex;gap:10px;align-items:center;margin-left:auto}
-.legitem{display:flex;align-items:center;gap:4px;font-size:.73em;color:var(--text2)}
+.legitem{display:flex;align-items:center;gap:5px;font-size:.86em;color:var(--text2)}
 .legline{width:18px;height:3px;border-radius:2px}
 .legin{background:var(--ok)}.legout{background:var(--accent)}
 /* Y scale badge in the header */
-.yscale-badge{font-size:.72em;font-weight:bold;background:var(--accent2);
+.yscale-badge{font-size:.84em;font-weight:bold;background:var(--accent2);
               color:var(--accent);padding:2px 8px;border-radius:10px;
               border:1px solid var(--border2);white-space:nowrap}
 /* Scrollbar custom */
@@ -1363,7 +1463,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 </head>
 <body>
 
-<!-- ── HEADER ─────────────────────────────────────────────── -->
+<!-- -- HEADER ----------------------------------------------- -->
 <div class="hdr">
   <div class="hl">
     <span class="hdot"></span>
@@ -1372,7 +1472,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
         MRTG Bandwidth Monitor
       </span>
     </h1>
-    <span class="vtag">v1.22</span>
+    <span class="vtag">v1.27</span>
   </div>
   <div class="hr2">
     <!-- Current Y scale mode badge -->
@@ -1390,7 +1490,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 <div id="panels" style="flex:1;display:flex;flex-direction:column;
      overflow:hidden;min-height:0"></div>
 
-<!-- ── FOOTER ─────────────────────────────────────────────── -->
+<!-- -- FOOTER ----------------------------------------------- -->
 <div class="fbar">
   <!-- Barre principale footer -->
   <div class="fbar-main">
@@ -1435,7 +1535,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
       <!-- Value field + apply button -->
       <div class="ci" id="thrInputGroup">
         <input type="number" id="thrInput" value="$initThr" min="1" max="200000">
-        <span style="color:var(--text3);font-size:.76em">Mbps</span>
+        <span style="color:var(--text3);font-size:.88em">Mbps</span>
         <button class="btn" onclick="applyThr()">OK</button>
       </div>
     </div>
@@ -1464,11 +1564,22 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 
     <div class="opt-sep"></div>
 
+    <!-- Group: Unit (bits/s vs bytes/s) -->
+    <div class="opt-group">
+      <span class="opt-title">Unit</span>
+      <select id="unitSelect" onchange="applyUnit()">
+        <option value="bits" selected>Mbps (bits/s)</option>
+        <option value="bytes">MB/s (bytes/s)</option>
+      </select>
+    </div>
+
+    <div class="opt-sep"></div>
+
     <!-- Group: Point size -->
     <div class="opt-group">
       <span class="opt-title">Points</span>
       <div class="sg">
-        <label>Taille :</label>
+        <label>Size:</label>
         <input type="range" id="sPtSize" min="0" max="8" step="0.5" value="0.5"
                oninput="updPtSize(this.value)">
         <span class="sv2" id="vPtSize">0.5 px</span>
@@ -1507,6 +1618,9 @@ var thrVal      = $initThr;       // Threshold value in Mbps
 var thrEnabled  = $initThrEn;     // Threshold active or not
 var yScaleMode  = '$initYScale';  // "auto" or numeric value
 var ptSize      = 0.5;            // Point size in px (default 0.5)
+var unitMode    = 'bits';         // 'bits' = Kbps/Mbps/Gbps, 'bytes' = KB/s,MB/s,GB/s
+                                  // Data is ALWAYS stored in Mbps; bytes mode is a
+                                  // pure display conversion (Mbps / 8 = MB/s).
 
 // CRITICAL FLAG: PS initializes the UI only once on load
 // Without this flag, each 2s cycle would overwrite the user's choices
@@ -1612,10 +1726,19 @@ function ftTip(ms){
          ('0'+d.getSeconds()).slice(-2);
 }
 
-// Formats an Mbps value into a readable string (1 line - tooltips/stats)
+// Formats an Mbps value into a readable string (1 line - tooltips/stats).
+// Honors unitMode: bits (Kbps/Mbps/Gbps) or bytes (KB/s, MB/s, GB/s).
+// Data is always in Mbps; bytes display = Mbps / 8.
 function fmb(v){
   v = parseFloat(v);
   if(isNaN(v) || v < 0) return '--';
+  if(unitMode === 'bytes'){
+    var b = v / 8;                       // MB/s
+    if(b === 0)    return '0 KB/s';
+    if(b >= 1000)  return (b/1000).toFixed(2)+' GB/s';
+    if(b >= 1)     return b.toFixed(2)+' MB/s';
+    return (b*1000).toFixed(0)+' KB/s';
+  }
   if(v === 0)   return '0 Kbps';
   if(v >= 1000) return (v/1000).toFixed(2)+' Gbps';
   if(v >= 1)    return v.toFixed(2)+' Mbps';
@@ -1633,17 +1756,42 @@ function yTick(value){
   var v = parseFloat(value);
   if(isNaN(v) || v < 0) return '';
   if(v === 0) return '0';                 // zero stays on 1 line, no unit
-  if(v >= 1000){
-    var g = v / 1000;
-    var gs = (g % 1 === 0) ? String(g)
-            : g.toFixed(2).replace(/0+$/,'').replace(/\.$/,'');
-    return [gs, 'Gbps'];                   // line 1 = value, line 2 = unit
+  function two(x){ return (x % 1 === 0) ? String(x)
+                   : x.toFixed(2).replace(/0+$/,'').replace(/\.$/,''); }
+  if(unitMode === 'bytes'){
+    var b = v / 8;                        // axis values are Mbps -> MB/s
+    if(b >= 1000) return [two(b/1000), 'GB/s'];
+    if(b >= 1)    return [two(b), 'MB/s'];
+    return [String(Math.round(b * 1000)), 'KB/s'];
   }
+  if(v >= 1000) return [two(v/1000), 'Gbps'];
   if(v >= 1){
     var ms = (v % 1 === 0) ? String(v) : v.toFixed(1);
     return [ms, 'Mbps'];
   }
   return [String(Math.round(v * 1000)), 'Kbps'];
+}
+
+// ============================================================
+// UNIT TOGGLE (Options) - display only, data stays in Mbps
+// ============================================================
+function applyUnit(){
+  var s = document.getElementById('unitSelect');
+  if(!s) return;
+  unitMode = (s.value === 'bytes') ? 'bytes' : 'bits';
+  // Refresh Y badge with the new unit
+  var badge = document.getElementById('ysBadge');
+  if(badge){
+    badge.textContent = (yScaleMode === 'auto') ? 'Y: Auto'
+                       : 'Y: ' + fmb(parseFloat(yScaleMode));
+  }
+  // Redraw every chart and refresh every stats bar immediately
+  if(MD && MD.ifaces){
+    redrawAll();
+    ifaceOrder.forEach(function(n){
+      if(MD.ifaces[n]) updateStats(n, MD.ifaces[n]);
+    });
+  }
 }
 
 // Updates the textContent of an element by its id
@@ -1852,7 +2000,7 @@ function makeChart(cid, compact){
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: {
+        tooltip: { titleFont: { size: 13 }, bodyFont: { size: 13 }, callbacks: {
           title: function(items){
             if(!items || !items.length) return '';
             return ftTip(items[0].parsed.x);
@@ -1882,7 +2030,7 @@ function makeChart(cid, compact){
             // Show all 7 ticks without skipping any
             autoSkip: false,
             // v1.11: hours at the same size as the rates (Y axis)
-            font: { size: compact ? 9 : 12, family: 'Consolas' },
+            font: { size: compact ? 11 : 14, family: 'Consolas' },
             maxRotation: 0,
             // Reformats the timestamp (ms) by the chart's view
             callback: function(value){
@@ -1898,7 +2046,7 @@ function makeChart(cid, compact){
           ticks: {
             color: gcs('--tickY'),
             // v1.9: larger font for readability
-            font: { size: compact ? 9 : 12, family: 'Consolas' },
+            font: { size: compact ? 11 : 14, family: 'Consolas' },
             // Fewer ticks: leaves room for 2-line labels
             maxTicksLimit: compact ? 5 : 7,
             padding: 3,
@@ -1968,7 +2116,7 @@ function buildPanelHTML(name, info){
   var link = (info && info.link > 0) ? fmb(info.link) : '?';
   var desc = (info && info.desc) ? info.desc : '';
 
-  // ── Barre de stats ────────────────────────────────────────
+  // -- Barre de stats ----------------------------------------
   var ibar =
     '<div class="ibar">' +
     '<div class="si"><span class="sl">&#128246;</span>' +
@@ -2280,7 +2428,7 @@ function exportSnapshot(){
 
   // Build the snapshot HTML
   var html =
-    '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<!DOCTYPE html><html lang="en" translate="no"><head><meta charset="UTF-8">' +
     '<title>PS-MRTG Snapshot ' + ts + '</title>' +
     (chartSrc
       ? '<script>' + chartSrc + '<\/script>'
@@ -2300,7 +2448,11 @@ function exportSnapshot(){
     // Snapshot chart rendering script
     '<script>var D=' + JSON.stringify(MD) + ';' +
     'var ST=[10,100,1000,10000,100000,200000];' +
+    'var UM="'+unitMode+'";' +
     'function fmb(v){v=parseFloat(v);if(isNaN(v)||v<0)return"--";' +
+    'if(UM==="bytes"){var b=v/8;if(b===0)return"0 KB/s";' +
+    'if(b>=1000)return(b/1000).toFixed(2)+" GB/s";' +
+    'if(b>=1)return b.toFixed(2)+" MB/s";return(b*1000).toFixed(0)+" KB/s";}' +
     'if(v===0)return"0 Kbps";if(v>=1000)return(v/1000).toFixed(2)+" Gbps";' +
     'if(v>=1)return v.toFixed(2)+" Mbps";return(v*1000).toFixed(0)+" Kbps";}' +
     'function yt(v){v=parseFloat(v);if(isNaN(v)||v<0)return"";if(v===0)return"0";' +
@@ -2342,8 +2494,8 @@ function exportSnapshot(){
     ']},' +
     'options:{responsive:true,maintainAspectRatio:false,animation:false,' +
     'plugins:{legend:{display:false}},' +
-    'scales:{x:{ticks:{maxTicksLimit:6,font:{size:11}}},' +
-    'y:{min:0,max:ym,ticks:{font:{size:11},maxTicksLimit:6,padding:3,callback:function(v){return yt(v);}}}}}});' +
+    'scales:{x:{ticks:{maxTicksLimit:6,font:{size:12}}},' +
+    'y:{min:0,max:ym,ticks:{font:{size:12},maxTicksLimit:6,padding:3,callback:function(v){return yt(v);}}}}}});' +
     '});});' +
     '<\/script></body></html>';
 
@@ -2440,7 +2592,7 @@ $script:startMs = Get-NowMs
 Write-Host ""
 Write-Host "  Mode : $($ExecutionContext.SessionState.LanguageMode)" -ForegroundColor Cyan
 Write-Host "  =============================================" -ForegroundColor Cyan
-Write-Host "   PS-MRTG v1.22 - MRTG Bandwidth Monitor"                  -ForegroundColor White
+Write-Host "   PS-MRTG v1.27 - MRTG Bandwidth Monitor"                  -ForegroundColor White
 Write-Host "   Network bandwidth - real time"          -ForegroundColor Yellow
 Write-Host "   Interval   : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
 Write-Host "   Y scale  : $YScaleMode"                    -ForegroundColor Yellow
@@ -2504,7 +2656,7 @@ if ($script:browserProc) {
 Write-Host "  Ctrl+C to stop." -ForegroundColor Gray
 Write-Host ""
 
-# ── Boucle principale ────────────────────────────────────────
+# -- Boucle principale ----------------------------------------
 $lastWrite   = Get-Date
 $lastCollect = Get-Date
 $lastAlive   = Get-Date
@@ -2512,24 +2664,52 @@ $startWatch  = Get-Date
 $AliveEvery  = 5     # seconds between two window checks
 $WatchGrace  = 12    # grace (s): give the browser time to spawn its process
 $wasAlive    = $false  # true once the dashboard window is confirmed open
-$missStreak  = 0     # consecutive checks with no browser -> closed
+$missStreak  = 0     # consecutive checks with the window absent
+$MissNeeded  = 12    # need this many in a row (~60s) before stopping
+$script:Superseded = $false  # set when a NEWER instance takes the lock
 
 try {
     while ($true) {
 
-        # --- Window watch (auto-stop), v1.22 ---
-        # Detect the dashboard window via ANY browser process using our
-        # dedicated profile dir (robust to Edge/Chrome launcher hand-off,
-        # which made the old PID-based watch unreliable). Stop once the
-        # window was confirmed open AND then absent on 2 consecutive checks.
-        if (((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
-            if (((Get-Date) - $lastAlive).TotalSeconds -ge $AliveEvery) {
-                $lastAlive = Get-Date
+        # --- Watch (auto-stop), v1.24: two decoupled mechanisms ---
+        #
+        # (A) RELAUNCH -> instant lock handover (no delay, no overlap).
+        #     Every check we re-read instance.lock. If it no longer contains
+        #     OUR PID, a newer instance has taken over: we step down
+        #     IMMEDIATELY, without flushing data or touching the browser
+        #     (both now belong to the new instance). This is what makes the
+        #     long close-confirmation below completely safe: a relaunch never
+        #     waits on it, so two instances can never overlap.
+        #
+        # (B) WINDOW CLOSED -> coupled signals + long confirmation.
+        #     Test-BrowserOpen returns "open" if ANY of its signals (window
+        #     TITLE, dedicated profile dir, process handle) says so; "closed"
+        #     requires ALL of them to agree. On top of that the window must
+        #     stay absent ~60s (12 consecutive checks) before we stop. A
+        #     false kill while the dashboard is open is thus practically
+        #     impossible -- and the 60s delay costs nothing, because nobody
+        #     is waiting (the user already closed the window, and relaunches
+        #     are handled instantly by (A)).
+        if (((Get-Date) - $lastAlive).TotalSeconds -ge $AliveEvery) {
+            $lastAlive = Get-Date
+
+            # (A) lock handover check -- instant supersede
+            try {
+                $cur = (Get-Content -Path $lockFile -ErrorAction Stop | Select-Object -First 1) -split '\|'
+                if ($cur[0] -and ([int]$cur[0]) -ne $PID) {
+                    Write-Host "  Newer instance detected (PID $($cur[0])) -> stepping down." -ForegroundColor Yellow
+                    $script:Superseded = $true
+                    break
+                }
+            } catch { }   # unreadable lock: keep running, never kill on doubt
+
+            # (B) window-closed check -- after grace period only
+            if (((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
                 if (Test-BrowserOpen -ProfileDir $profileDir) {
                     $wasAlive = $true; $missStreak = 0
                 } elseif ($wasAlive) {
                     $missStreak++
-                    if ($missStreak -ge 2) {
+                    if ($missStreak -ge $MissNeeded) {
                         Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
                         break
                     }
@@ -2574,18 +2754,25 @@ try {
 finally {
     # Block executed even on Ctrl+C
     Write-Host ""
-    Write-Host "  Stopping PS-MRTG..." -ForegroundColor Yellow
-    Write-DataJs   # Final data flush
-    Write-Host "  Final report : $htmlFile" -ForegroundColor Gray
-    # Release single-instance lock and close our own browser window if it
-    # is still open (e.g. on Ctrl+C), so nothing is left orphaned.
-    Remove-Item -Path $lockFile -Force -ErrorAction SilentlyContinue
-    try {
-        Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
-            Where-Object { $_.CommandLine -like "*$profileDir*" } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    } catch { }
-    Write-Host "  Stopped." -ForegroundColor Green
+    if ($script:Superseded) {
+        # A newer instance took over: hands off EVERYTHING. The data file,
+        # the lock and the browser window now belong to it -- flushing or
+        # cleaning here would corrupt the new run. Just leave silently.
+        Write-Host "  Superseded by a newer instance -- exiting without cleanup." -ForegroundColor Yellow
+    } else {
+        Write-Host "  Stopping PS-MRTG..." -ForegroundColor Yellow
+        Write-DataJs   # Final data flush
+        Write-Host "  Final report : $htmlFile" -ForegroundColor Gray
+        # Release single-instance lock and close our own browser window if it
+        # is still open (e.g. on Ctrl+C), so nothing is left orphaned.
+        Remove-Item -Path $lockFile -Force -ErrorAction SilentlyContinue
+        try {
+            Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*$profileDir*" } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } catch { }
+        Write-Host "  Stopped." -ForegroundColor Green
+    }
     Write-Host ""
     Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 }
