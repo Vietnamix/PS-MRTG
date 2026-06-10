@@ -7,7 +7,8 @@
 ![Platform](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server-0078D6?logo=windows&logoColor=white)
 ![Chart.js](https://img.shields.io/badge/Chart.js-4.4.0-FF6384?logo=chartdotjs&logoColor=white)
 ![Mode](https://img.shields.io/badge/ConstrainedLanguage-compatible-success)
-![Version](https://img.shields.io/badge/version-1.16-blue)
+[![PSGallery](https://img.shields.io/powershellgallery/v/PS-MRTG?label=PowerShell%20Gallery&color=blue)](https://www.powershellgallery.com/packages/PS-MRTG)
+[![Downloads](https://img.shields.io/powershellgallery/dt/PS-MRTG?label=t%C3%A9l%C3%A9chargements&color=brightgreen)](https://www.powershellgallery.com/packages/PS-MRTG)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 PS-MRTG sonde les compteurs réseau de Windows et affiche, en direct dans votre
@@ -66,38 +67,95 @@ Chaque vue conserve 720 points ; le « recul » est la fenêtre couverte une foi
 
 ## 📥 Installation
 
+### Option A — PowerShell Gallery (recommandé)
+
+PS-MRTG est publié sur la [PowerShell Gallery](https://www.powershellgallery.com/packages/PS-MRTG) :
+
+```powershell
+# Installation (pour l'utilisateur courant, sans droits admin)
+Install-Script -Name PS-MRTG -Scope CurrentUser
+
+# Mise à jour vers la dernière version
+Update-Script -Name PS-MRTG
+
+# Réinstallation propre (force la dernière version)
+Uninstall-Script -Name PS-MRTG -Force
+Install-Script   -Name PS-MRTG -Force
+
+# Désinstallation
+Uninstall-Script -Name PS-MRTG -Force
+```
+
+> **Première installation ?** PowerShell peut demander d'installer le fournisseur **NuGet**
+> et de faire confiance au dépôt **PSGallery** : répondez `Y` (Oui), ou exécutez au préalable :
+> ```powershell
+> Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+> ```
+
+Le script est installé dans le dossier `Scripts` de PowerShell
+(`$env:USERPROFILE\Documents\WindowsPowerShell\Scripts` avec `-Scope CurrentUser`,
+`C:\Program Files\WindowsPowerShell\Scripts` sinon). Ce dossier étant ajouté au `PATH`,
+vous pouvez ensuite lancer le moniteur depuis n'importe où :
+
+```powershell
+PS-MRTG.ps1
+```
+
+Vérifier la version installée :
+
+```powershell
+Get-InstalledScript -Name PS-MRTG
+```
+
+> **PowerShell 7+ / PSResourceGet** — l'équivalent moderne fonctionne aussi :
+> ```powershell
+> Install-PSResource -Name PS-MRTG
+> Update-PSResource  -Name PS-MRTG
+> Uninstall-PSResource -Name PS-MRTG
+> ```
+
+### Option B — Clonage du dépôt (manuel)
+
 1. **Cloner le dépôt** (ou télécharger le `.ps1`) :
 
    ```powershell
-   git clone https://github.com/votre-utilisateur/ps-mrtg.git
-   cd ps-mrtg
+   git clone https://github.com/Vietnamix/PS-MRTG.git
+   cd PS-MRTG
    ```
 
-2. **Fournir Chart.js en local** (recommandé pour le mode offline).
-   Téléchargez `chart.umd.min.js` depuis le CDN officiel :
+### Chart.js en local (commun aux deux options)
 
-   ```
-   https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js
-   ```
+**Fournissez Chart.js en local** (recommandé pour le mode offline).
+Téléchargez `chart.umd.min.js` depuis le CDN officiel :
 
-   Renommez‑le `chartjs.min.js` et placez‑le dans l'un de ces emplacements (le script les cherche dans cet ordre) :
+```
+https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js
+```
 
-   ```
-   %TEMP%\PSMrtg\chartjs.min.js
-   %USERPROFILE%\Documents\chartjs.min.js
-   %USERPROFILE%\Desktop\chartjs.min.js
-   ```
+Renommez‑le `chartjs.min.js` et placez‑le dans l'un de ces emplacements (le script les cherche dans cet ordre) :
 
-   > Si le fichier est introuvable, le script tente de le télécharger automatiquement, puis se rabat en dernier recours sur le CDN (ce qui nécessite alors une connexion Internet).
+```
+%TEMP%\PSMrtg\chartjs.min.js
+%USERPROFILE%\Documents\chartjs.min.js
+%USERPROFILE%\Desktop\chartjs.min.js
+```
+
+> Si le fichier est introuvable, le script tente de le télécharger automatiquement, puis se rabat en dernier recours sur le CDN (ce qui nécessite alors une connexion Internet).
 
 ---
 
 ## ▶️ Utilisation
 
-Lancez simplement le script :
+Si installé depuis la PowerShell Gallery :
 
 ```powershell
-.\PS-MRTG_v1.16.ps1
+PS-MRTG.ps1
+```
+
+Si cloné depuis GitHub :
+
+```powershell
+.\PS-MRTG.ps1
 ```
 
 Le script :
@@ -110,7 +168,7 @@ Le script :
 
 > **Politique d'exécution** — si le script est bloqué, autorisez‑le pour la session courante :
 > ```powershell
-> powershell -ExecutionPolicy Bypass -File .\PS-MRTG_v1.16.ps1
+> powershell -ExecutionPolicy Bypass -File .\PS-MRTG.ps1
 > ```
 > Lancé depuis l'ISE, le script se relance tout seul dans `powershell.exe`.
 
@@ -180,6 +238,7 @@ Les réglages **Thème**, **Échelle Y**, **Seuil** et **Taille des points** son
 - **Graphiques vides / « Chart is not defined »** : `chartjs.min.js` n'a pas été trouvé localement et aucune connexion n'est disponible. Déposez le fichier dans `%TEMP%\PSMrtg\`.
 - **Le navigateur ne s'ouvre pas** : ouvrez manuellement `%TEMP%\PSMrtg\dashboard.html`.
 - **Script bloqué au lancement** : utilisez `-ExecutionPolicy Bypass` (voir plus haut).
+- **`PS-MRTG.ps1` introuvable après `Install-Script`** : ouvrez une nouvelle console (le `PATH` est mis à jour à l'ouverture de session), ou lancez `& "$env:USERPROFILE\Documents\WindowsPowerShell\Scripts\PS-MRTG.ps1"`.
 
 ---
 
@@ -199,6 +258,7 @@ Merci de décrire clairement le comportement attendu et l'environnement testé (
 
 ## 📝 Changelog (extraits récents)
 
+- **v1.29** — Lisibilité v2 : tailles de police des graphiques centralisées dans une constante `FS` (corrige une régression v1.27), graduations d'axe agrandies (12px compact / 15px plein écran), tooltips 14px, UI globale agrandie d'un cran.
 - **v1.16** — Axe X divisé en 6 segments égaux (10 min en Live, 1 h / 10 h / 60 h selon la vue).
 - **v1.15** — Axe X à domaine temporel fixe : les données s'affichent à leur position réelle.
 - **v1.14** — Affichage du recul (période couverte) à côté de chaque graphique.
@@ -211,7 +271,7 @@ Merci de décrire clairement le comportement attendu et l'environnement testé (
 
 ## 📄 Licence
 
-Distribué sous licence **MIT**. Voir le fichier [`LICENSE.md`](License.md).
+Distribué sous licence **MIT**. Voir le fichier [`LICENSE.md`](LICENSE.md).
 
 ---
 
