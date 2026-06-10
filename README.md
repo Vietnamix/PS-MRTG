@@ -256,9 +256,21 @@ Merci de décrire clairement le comportement attendu et l'environnement testé (
 
 ---
 
-## 📝 Changelog (extraits récents)
+## 📝 Changelog
 
-- **v1.29** — Lisibilité v2 : tailles de police des graphiques centralisées dans une constante `FS` (corrige une régression v1.27), graduations d'axe agrandies (12px compact / 15px plein écran), tooltips 14px, UI globale agrandie d'un cran.
+- **v1.29** — Lisibilité v2 : tailles de police des graphiques centralisées dans une constante `FS` (corrige la régression v1.27 où la mise à jour /2 s annulait silencieusement l'agrandissement des polices d'axes), graduations d'axe agrandies (12px compact / 15px plein écran), tooltips 14px, UI globale agrandie d'un cran (en‑tête, onglets, barre de stats, légende, Options).
+- **v1.28** — Cadence d'écriture corrigée : `network_data.js` n'est réécrit que si de **nouvelles** données ont été collectées — cadence effective = max(`$WriteEvery`, `$IntervalSec`), soit une écriture par collecte.
+- **v1.27** — Lisibilité v1 : premier agrandissement des polices d'axes des graphiques.
+- **v1.26** — **FIX crash de parsing** : fichier désormais **100 % ASCII** (tirets cadratins, caractères semi‑graphiques et points médians remplacés). Sans BOM UTF‑8, PowerShell 5.1 lisait le fichier en ANSI et un tiret cadratin devenait un guillemet qui terminait une chaîne → explosion du parseur. L'encodage ne peut plus rien casser : le script se parse à l'identique avec ou sans BOM.
+- **v1.25** — **FIX popup de traduction** (la page déclarait `lang="fr"` : désormais `lang="en"` + `translate="no"` + meta `notranslate` + `--lang=en-US`) ; **ouverture de fenêtre bien plus rapide** : profil navigateur stable réutilisé entre les lancements (au lieu d'une initialisation complète à chaque fois).
+- **v1.24** — Architecture d'arrêt **découplée** : (A) relance → passation instantanée via `instance.lock` (l'ancienne instance détecte un nouveau PID et s'efface d'elle‑même, aucun chevauchement) ; (B) fermeture de fenêtre → détection à triple signal (titre + profil + handle) maintenue ~60 s avant arrêt → faux arrêt quasi impossible. Reprise au démarrage « graceful‑first » (arrêt forcé en dernier recours).
+- **v1.23** — **FIX faux auto‑arrêt** : la détection de fenêtre combine désormais trois signaux (titre de fenêtre, dossier de profil dédié, handle du processus) et exige une absence soutenue (~30 s) avant de conclure « fermée ».
+- **v1.22** — **FIX auto‑arrêt** : la fenêtre est détectée via tout processus navigateur utilisant notre profil `--user-data-dir` dédié (Edge/Chrome relaient le processus lancé à une instance existante, ce qui rendait la surveillance par PID inopérante) ; **instance unique** via fichier verrou (deux exécutions ne doublonnent plus les graphes) ; sortie propre (verrou libéré, fenêtre fermée).
+- **v1.21** — Métadonnées PowerShell Gallery : icône (`ICONURI`), tags étendus (badges `PSEdition_Desktop`/`Core`), description enrichie pour la découvrabilité. Aucun changement fonctionnel.
+- **v1.20** — **FIX régression v1.18** : en mode caché, la surveillance du navigateur pouvait arrêter le script en ~5 s (processus lanceur Edge/Chrome quittant aussitôt) → graphe vide. Auto‑arrêt durci (délai de grâce 30 s, double confirmation) ; **journal de diagnostic** `%TEMP%\PSMrtg\PS-MRTG.log` via `Start-Transcript`.
+- **v1.19** — **Traduction intégrale en anglais** : commentaires, messages console et UI HTML. Effet de bord : plus aucun caractère accentué → fin des risques d'encodage/mojibake. Message d'attente explicite lors de la relance depuis l'ISE.
+- **v1.18** — **Console PowerShell cachée** (`HideConsole`) : seule la fenêtre du navigateur reste visible (mode `--app`) ; **auto‑arrêt** à la fermeture de la fenêtre HTML.
+- **v1.17** — **FIX détection ISE** via `$PSCommandPath` : le script fonctionne aussi lancé directement ou installé depuis la PowerShell Gallery.
 - **v1.16** — Axe X divisé en 6 segments égaux (10 min en Live, 1 h / 10 h / 60 h selon la vue).
 - **v1.15** — Axe X à domaine temporel fixe : les données s'affichent à leur position réelle.
 - **v1.14** — Affichage du recul (période couverte) à côté de chaque graphique.
@@ -277,6 +289,6 @@ Distribué sous licence **MIT**. Voir le fichier [`LICENSE.md`](LICENSE.md).
 
 ## 👤 Auteur
 
-**Eric Guiffault**
+**[Eric Guiffault](https://eric.guiffault.com)**
 
 Si ce projet vous est utile, pensez à me laisser une ⭐ sur GitHub !
