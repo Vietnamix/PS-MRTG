@@ -1,14 +1,57 @@
 # ============================================================
 # SCRIPT  : PS-MRTG - Network Bandwidth Monitor
-# VERSION : 1.27
+# VERSION : 1.29
 # AUTEUR  : Eric Guiffault
-# DATE    : 2026-05
+# DATE    : 2026-06
 #
 # DESCRIPTION :
 #   Real-time network bandwidth monitoring.
 #   Classic MRTG style - 4 aggregated time views.
 #   Interactive HTML interface - 100% offline.
 #   Compatible with strict ConstrainedLanguage (PS 5.1 + PS 7+).
+#
+# CHANGELOG v1.29 :
+#   - FIX font regression: the v1.27 axis-font bump was silently
+#     REVERTED ~2s after load. makeChart() created the charts with the
+#     new sizes, but updateChartsForIface() (called every refresh
+#     cycle) overwrote them with the OLD hardcoded 9/12 values. All
+#     chart font sizes now live in ONE JS constant (FS) referenced by
+#     makeChart, updateChartsForIface AND the threshold-line plugin:
+#     they can never diverge again.
+#   - Readability v2 (charts): axis ticks 12px compact / 15px full
+#     screen, tooltips 14px, threshold/10M line labels 11/13px,
+#     snapshot axes 13px.
+#   - Readability v2 (UI): every text element bumped one notch -
+#     header title 1.3em, duration 1.05em, clock 1em, interface tabs
+#     1.05em, view tabs .95em, stats bar 1em (30px tall), cell labels
+#     .95em, Options panel labels .95em, inputs/selects .98em, buttons
+#     .95em, legend .95em, badges .9-.92em, stale banner 16px.
+#
+# CHANGELOG v1.28 :
+#   - FAST AUTO-STOP: the real browser WINDOW process is identified once
+#     at startup (single CIM scan: our --user-data-dir, --app= present,
+#     no --type= -> the Chromium root). The watch then becomes a cheap
+#     Get-Process check every 2s; the script stops ~6s after the window
+#     closes (vs ~60s in v1.24). One re-scan per miss protects against
+#     browser self-restart. If CIM is unavailable, the v1.24 3-signal
+#     fallback remains (slower but safe). No more permanent CIM polling.
+#   - STALE BANNER + SESSION GUARD (ported from PS-PING): the dashboard
+#     now uses startMs (exported since v1.x but never read). If the data
+#     file stops being refreshed (>12s), a red "MONITORING STOPPED"
+#     banner appears instead of silently freezing the graphs. If a NEW
+#     session takes over in the same window, the page reloads itself.
+#   - PERF (long runs): per-view serialization CACHE - each view is
+#     re-serialized only when it gained a point (Week: once per 30 min
+#     instead of every 2s). Serialize-View is now linear (no array +=).
+#     network_data.js is written only after a real collection (every
+#     IntervalSec), not on a separate faster timer.
+#   - Atomic data write: network_data.js goes through .tmp + Move-Item,
+#     so the browser can never read a half-written file.
+#   - REMOVED dead code: the browser->PS command channel (mrtg_cmd.js /
+#     Read-CmdFile). Under file:// the page cannot write files; threshold
+#     and Y-scale have been 100% client-side since v1.9. Nothing read it.
+#   - Log hygiene: the per-write console rate line is now printed every
+#     30s (the transcript no longer grows by one line every 2s).
 #
 # CHANGELOG v1.27 :
 #   - Readability: font sizes increased across the whole UI (header,
@@ -271,7 +314,9 @@ $MaxPoints   = 720
 # Network counter collection interval (seconds)
 $IntervalSec = 5
 
-# network_data.js write frequency (seconds)
+# Minimum delay between two network_data.js writes (seconds).
+# v1.28: a write now also requires NEW collected data, so the effective
+# cadence is max($WriteEvery, $IntervalSec) - one write per collection.
 $WriteEvery  = 2
 
 # ============================================================
@@ -297,9 +342,6 @@ $htmlFile = "$scriptTemp\dashboard.html"
 
 # JS data file (reloaded every 2s by the browser)
 $dataFile = "$scriptTemp\network_data.js"
-
-# Browser -> PS command file (threshold, yScale, etc.)
-$cmdFile  = "$scriptTemp\mrtg_cmd.js"
 
 # Dedicated browser profile (--app mode): isolates the Edge/Chrome instance and
 # creates a CLEAN, monitorable process, for auto-stop on closing
@@ -756,6 +798,14 @@ function Init-InterfaceBuffers {
 
         # -- WEEK consolidation accumulators (360x5s = 30min) --
         Acc1800In = [double]0; Acc1800Out= [double]0; Acc1800N= [int]0
+
+        # -- Serialization cache (v1.28) ----------------------
+        # Each view's JSON string is rebuilt ONLY when the view
+        # gained a point (Dirty*). Week changes once per 30 min:
+        # no reason to re-serialize 720 points every write.
+        JsLive = ""; JsHour = ""; JsDay = ""; JsWeek = ""
+        DirtyLive = $true; DirtyHour = $true
+        DirtyDay  = $true; DirtyWeek = $true
     }
 
     # Previous raw counters for differential calculation
@@ -795,6 +845,7 @@ function Add-DataPoint {
     $iface.LiveIn   += $MbpsIn
     $iface.LiveOut  += $MbpsOut
     $iface.LiveCount++
+    $iface.DirtyLive = $true
     # Sliding window: truncate on overflow
     if ($iface.LiveCount -gt $MaxPoints) {
         $cut = $iface.LiveCount - $MaxPoints
@@ -815,6 +866,7 @@ function Add-DataPoint {
         $iface.HourIn   += $aI
         $iface.HourOut  += $aO
         $iface.HourCount++
+        $iface.DirtyHour = $true
         if ($iface.HourCount -gt $MaxPoints) {
             $cut = $iface.HourCount - $MaxPoints
             $iface.HourTs    = $iface.HourTs[$cut..($iface.HourCount-1)]
@@ -839,6 +891,7 @@ function Add-DataPoint {
         $iface.DayIn   += $aI
         $iface.DayOut  += $aO
         $iface.DayCount++
+        $iface.DirtyDay = $true
         if ($iface.DayCount -gt $MaxPoints) {
             $cut = $iface.DayCount - $MaxPoints
             $iface.DayTs    = $iface.DayTs[$cut..($iface.DayCount-1)]
@@ -862,6 +915,7 @@ function Add-DataPoint {
         $iface.WeekIn   += $aI
         $iface.WeekOut  += $aO
         $iface.WeekCount++
+        $iface.DirtyWeek = $true
         if ($iface.WeekCount -gt $MaxPoints) {
             $cut = $iface.WeekCount - $MaxPoints
             $iface.WeekTs    = $iface.WeekTs[$cut..($iface.WeekCount-1)]
@@ -966,12 +1020,14 @@ function Serialize-View {
         [array]$Out,    # Array of OUT rates (Mbps)
         [int]$Count     # Number of valid points
     )
-    $pts = @()
-    for ($i = 0; $i -lt $Count; $i++) {
+    # v1.28: linear build. The previous `$pts += "..."` pattern recopied
+    # the whole array at every iteration (O(n^2) per call). Capturing the
+    # for-loop output assigns once and stays ConstrainedLanguage-safe.
+    $pts = for ($i = 0; $i -lt $Count; $i++) {
         $t  = [long]$Ts[$i]
         $vi = Double-ToJs ([double]$In[$i])
         $vo = Double-ToJs ([double]$Out[$i])
-        $pts += "{t:$t,i:$vi,o:$vo}"
+        "{t:$t,i:$vi,o:$vo}"
     }
     return "[" + ($pts -join ",") + "]"
 }
@@ -1002,11 +1058,27 @@ function Write-DataJs {
             $linkMbps = [double]$info.LinkSpeedMbps
         }
 
-        # Serialize the 4 views
-        $liveJs = Serialize-View $iface.LiveTs $iface.LiveIn $iface.LiveOut $iface.LiveCount
-        $hourJs = Serialize-View $iface.HourTs $iface.HourIn $iface.HourOut $iface.HourCount
-        $dayJs  = Serialize-View $iface.DayTs  $iface.DayIn  $iface.DayOut  $iface.DayCount
-        $weekJs = Serialize-View $iface.WeekTs $iface.WeekIn $iface.WeekOut $iface.WeekCount
+        # Serialize the 4 views - from cache unless the view changed (v1.28)
+        if ($iface.DirtyLive -or $iface.JsLive -eq "") {
+            $iface.JsLive = Serialize-View $iface.LiveTs $iface.LiveIn $iface.LiveOut $iface.LiveCount
+            $iface.DirtyLive = $false
+        }
+        if ($iface.DirtyHour -or $iface.JsHour -eq "") {
+            $iface.JsHour = Serialize-View $iface.HourTs $iface.HourIn $iface.HourOut $iface.HourCount
+            $iface.DirtyHour = $false
+        }
+        if ($iface.DirtyDay -or $iface.JsDay -eq "") {
+            $iface.JsDay = Serialize-View $iface.DayTs $iface.DayIn $iface.DayOut $iface.DayCount
+            $iface.DirtyDay = $false
+        }
+        if ($iface.DirtyWeek -or $iface.JsWeek -eq "") {
+            $iface.JsWeek = Serialize-View $iface.WeekTs $iface.WeekIn $iface.WeekOut $iface.WeekCount
+            $iface.DirtyWeek = $false
+        }
+        $liveJs = $iface.JsLive
+        $hourJs = $iface.JsHour
+        $dayJs  = $iface.JsDay
+        $weekJs = $iface.JsWeek
 
         # Compute the global averages
         $avgIn  = [double]0
@@ -1042,6 +1114,8 @@ function Write-DataJs {
     $thrEnabledJs = if ($script:ThresholdEnabled) { "true" } else { "false" }
 
     # Write the JS file
+    # v1.28: wallMs = wall-clock of THIS write. The dashboard compares it
+    # to its own clock (same machine) to detect a stopped/dead monitor.
     $js = "window.MD={" +
           "ifaces:{" + ($ifParts -join ",") + "}," +
           "threshold:$(Double-ToJs ([double]$script:ThresholdAlert))," +
@@ -1049,59 +1123,28 @@ function Write-DataJs {
           "yScaleMode:$ysModeJs," +
           "dur:""$durStr""," +
           "now:""$nowStr""," +
+          "wallMs:$(Get-NowMs)," +
           "startMs:$($script:startMs)" +
           "};"
 
-    try { $js | Set-Content -Path $dataFile -Encoding UTF8 -ErrorAction Stop } catch {}
-}
-
-# ============================================================
-# SECTION 15 - READ BROWSER COMMANDS
-# The browser can write to mrtg_cmd.js to change
-# threshold, yScale, etc. on the PS side
-# ============================================================
-function Read-CmdFile {
-    if (-not (Test-Path $cmdFile)) { return }
+    # v1.28: ATOMIC write (.tmp then rename), PS-PING pattern. The browser
+    # reloads this file every 2s: a direct Set-Content could be read
+    # half-written (truncated JS -> skipped refresh cycle). Move-Item on
+    # the same volume is a rename: the reader sees either the old file or
+    # the new one, never a partial state.
     try {
-        $raw = Get-Content -Path $cmdFile -Raw -ErrorAction SilentlyContinue
-        if (-not $raw) {
-            Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
-            return
-        }
-
-        # Update the alarm threshold
-        if ($raw -match '"threshold"\s*:\s*(\d+(?:[.,]\d+)?)') {
-            $tStr = $Matches[1] -replace ',','.'
-            $newT = [double]0
-            try { $newT = [double]$tStr } catch {}
-            if ($newT -gt 0 -and $newT -le 200000) {
-                $script:ThresholdAlert = $newT
-                Write-Host "  Threshold -> $newT Mbps" -ForegroundColor Cyan
-            }
-        }
-
-        # Enable/disable the threshold
-        if ($raw -match '"thresholdEnabled"\s*:\s*(true|false)') {
-            $script:ThresholdEnabled = ($Matches[1] -eq "true")
-            Write-Host "  ThresholdEnabled -> $($script:ThresholdEnabled)" -ForegroundColor Cyan
-        }
-
-        # Change the Y scale mode
-        if ($raw -match '"yScale"\s*:\s*"([^"]+)"') {
-            $newY = $Matches[1]
-            if ($newY -eq "auto") {
-                $script:YScaleMode = "auto"
-            } else {
-                $yStr = $newY -replace ',','.'
-                $yv   = [double]0
-                try { $yv = [double]$yStr } catch {}
-                if ($yv -gt 0) { $script:YScaleMode = "$yv" }
-            }
-        }
-
-        Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
+        $tmpFile = "$dataFile.tmp"
+        $js | Set-Content -Path $tmpFile -Encoding UTF8 -ErrorAction Stop
+        Move-Item -Path $tmpFile -Destination $dataFile -Force -ErrorAction Stop
     } catch {}
 }
+
+# ============================================================
+# SECTION 15 - (removed in v1.28)
+# The browser->PS command channel (mrtg_cmd.js / Read-CmdFile)
+# was dead code: under file:// the page cannot write files, and
+# threshold / Y-scale are fully client-side since v1.9.
+# ============================================================
 
 # ============================================================
 # SECTION 16 - CHARGEMENT DE CHART.JS (OFFLINE)
@@ -1212,6 +1255,29 @@ function Open-Browser {
     }
 }
 
+# v1.28: identify the REAL window process, once. Chromium spawns a tree
+# (gpu, renderer, network...) whose children all carry --type=...; the
+# ROOT process - the one whose lifetime equals the window's - has our
+# --app= argument and NO --type=. Matching on our dedicated
+# --user-data-dir guarantees it is OUR window even if the launcher
+# handed off (the v1.22 problem). Returns 0 if not found / CIM down.
+function Find-BrowserWindowPid {
+    param([string]$ProfileDir)
+    try {
+        $procs = Get-CimInstance Win32_Process `
+                 -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop
+        foreach ($p in $procs) {
+            $cl = "$($p.CommandLine)"
+            if ($cl -like "*$ProfileDir*" -and
+                $cl -like "*--app=*" -and
+                $cl -notlike "*--type=*") {
+                return [int]$p.ProcessId
+            }
+        }
+    } catch { }
+    return 0
+}
+
 # Returns $true while the dashboard window is open. Primary signal: ANY
 # Edge/Chrome process whose command line uses our dedicated profile dir.
 # This is robust to Chromium's launcher hand-off (where the spawned PID
@@ -1264,7 +1330,7 @@ function Write-HtmlOnce {
 <meta charset="UTF-8">
 <meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>PS-MRTG v1.27 - MRTG Bandwidth Monitor</title>
+<title>PS-MRTG v1.29 - MRTG Bandwidth Monitor</title>
 $chartJsTag
 <style>
 /* -- CSS variables, dark theme (default) ------------------- */
@@ -1320,32 +1386,33 @@ body{background:var(--bg);color:var(--text);
      transition:background .25s,color .25s}
 
 /* -- Header ------------------------------------------------ */
+/* v1.29: all font sizes bumped one notch for readability */
 .hdr{background:var(--surface);padding:6px 16px;
      border-bottom:2px solid var(--border);
      display:flex;align-items:center;justify-content:space-between;
-     gap:10px;min-height:42px;flex-shrink:0}
+     gap:10px;min-height:46px;flex-shrink:0}
 .hl{display:flex;align-items:center;gap:10px}
-.hdr h1{font-size:1.15em;font-weight:bold;white-space:nowrap}
-.vtag{background:var(--accent2);color:var(--accent);font-size:.8em;
-      padding:2px 7px;border-radius:10px;font-weight:bold}
+.hdr h1{font-size:1.3em;font-weight:bold;white-space:nowrap}
+.vtag{background:var(--accent2);color:var(--accent);font-size:.9em;
+      padding:2px 8px;border-radius:10px;font-weight:bold}
 .hr2{display:flex;gap:8px;align-items:center;flex-shrink:0}
 /* Blinking dot indicating monitoring activity */
-.hdot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+.hdot{width:9px;height:9px;border-radius:50%;background:var(--ok);
       animation:pl 1.2s infinite;flex-shrink:0}
-.dur{color:var(--warn);font-size:.95em;font-weight:bold;white-space:nowrap}
-.nowt{color:var(--text3);font-size:.9em;white-space:nowrap}
+.dur{color:var(--warn);font-size:1.05em;font-weight:bold;white-space:nowrap}
+.nowt{color:var(--text3);font-size:1em;white-space:nowrap}
 .thbtn{background:transparent;border:1px solid var(--border2);color:var(--text3);
-       font-size:.85em;padding:4px 11px;border-radius:4px;cursor:pointer;white-space:nowrap}
+       font-size:.95em;padding:4px 12px;border-radius:4px;cursor:pointer;white-space:nowrap}
 .thbtn:hover{filter:brightness(1.25)}
 @keyframes pl{0%,100%{opacity:1}50%{opacity:.25}}
 
 /* -- Level 1 tabs: interface selection ---------------------- */
 .tabs1{background:var(--tab1-bg);border-bottom:2px solid var(--border);
        display:flex;align-items:flex-end;padding:0 12px;
-       gap:2px;flex-shrink:0;overflow-x:auto;min-height:36px}
+       gap:2px;flex-shrink:0;overflow-x:auto;min-height:40px}
 .tabs1::-webkit-scrollbar{height:3px}
 .tabs1::-webkit-scrollbar-thumb{background:var(--sb-th)}
-.t1btn{padding:8px 17px;font-size:.95em;font-weight:600;color:var(--tab1-c);
+.t1btn{padding:9px 18px;font-size:1.05em;font-weight:600;color:var(--tab1-c);
        cursor:pointer;border-radius:6px 6px 0 0;border:1px solid transparent;
        border-bottom:none;white-space:nowrap;transition:all .15s;
        background:transparent;display:flex;align-items:center;gap:6px}
@@ -1353,7 +1420,7 @@ body{background:var(--bg);color:var(--text);
 .t1btn.a{background:var(--tab1-act);color:var(--tab1-act-c);
           border-color:var(--tab1-bd);border-bottom-color:var(--tab1-act)}
 /* Small blinking green dot in each interface tab */
-.t1dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
+.t1dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
        animation:pl 1.4s infinite;flex-shrink:0}
 
 /* -- Per-interface panel --------------------------------- */
@@ -1363,9 +1430,9 @@ body{background:var(--bg);color:var(--text);
 /* -- Barre de stats (IN/OUT/Max/Moy) ---------------------- */
 .ibar{background:var(--surface2);padding:0 14px;
       border-bottom:1px solid var(--border2);
-      display:flex;align-items:center;font-size:.9em;
-      height:26px;flex-shrink:0;overflow:hidden}
-.sp{width:1px;height:13px;background:var(--border2);margin:0 9px;flex-shrink:0}
+      display:flex;align-items:center;font-size:1em;
+      height:30px;flex-shrink:0;overflow:hidden}
+.sp{width:1px;height:15px;background:var(--border2);margin:0 9px;flex-shrink:0}
 .si{display:flex;gap:3px;align-items:center;flex-shrink:0;white-space:nowrap}
 .sl{color:var(--text3)}.sv{font-weight:bold}
 .sin{color:var(--ok)}.sout{color:var(--accent)}.sn{color:var(--text2)}
@@ -1373,8 +1440,8 @@ body{background:var(--bg);color:var(--text);
 /* -- Level 2 tabs: time view selection ------------------- */
 .tabs2{background:var(--tab2-bg);padding:0 12px;
        display:flex;align-items:center;gap:3px;
-       border-bottom:1px solid var(--border2);min-height:32px;flex-shrink:0}
-.t2btn{padding:5px 14px;font-size:.88em;font-weight:600;color:var(--tab2-c);
+       border-bottom:1px solid var(--border2);min-height:36px;flex-shrink:0}
+.t2btn{padding:6px 15px;font-size:.95em;font-weight:600;color:var(--tab2-c);
        cursor:pointer;border-radius:4px;white-space:nowrap;transition:all .15s;
        border:1px solid transparent;background:transparent}
 .t2btn:hover{color:var(--tab2-act-c);background:var(--surface2)}
@@ -1397,7 +1464,7 @@ body{background:var(--bg);color:var(--text);
        border-radius:5px;padding:6px 8px;
        display:flex;flex-direction:column;overflow:hidden;min-height:0}
 /* Header of a chart cell (label + mini stats) */
-.gclbl{font-size:.84em;font-weight:bold;color:var(--text3);margin-bottom:3px;
+.gclbl{font-size:.95em;font-weight:bold;color:var(--text3);margin-bottom:3px;
        flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
 .gclbl-s{font-size:.95em;color:var(--text4)}
 .gcell canvas{flex:1;min-height:0}
@@ -1406,62 +1473,75 @@ body{background:var(--bg);color:var(--text);
 .fbar{background:var(--surface);border-top:1px solid var(--border);
       padding:0;display:flex;flex-direction:column;flex-shrink:0}
 .fbar-main{display:flex;align-items:center;gap:10px;
-           padding:5px 14px;flex-wrap:wrap;min-height:40px}
+           padding:5px 14px;flex-wrap:wrap;min-height:42px}
 /* Options panel (foldable) */
 .fbar-opts{background:var(--opt-bg);border-top:1px solid var(--opt-bd);
-           padding:7px 14px;display:none;flex-wrap:wrap;gap:14px;align-items:center}
+           padding:8px 14px;display:none;flex-wrap:wrap;gap:14px;align-items:center}
 .fbar-opts.open{display:flex}
 .opt-group{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.opt-title{color:var(--text3);font-size:.8em;font-weight:700;
+.opt-title{color:var(--text3);font-size:.88em;font-weight:700;
            text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
-.opt-sep{width:1px;height:22px;background:var(--border2);flex-shrink:0}
+.opt-sep{width:1px;height:24px;background:var(--border2);flex-shrink:0}
 
 /* -- Options panel controls -------------------------------- */
 .ci{display:flex;align-items:center;gap:5px}
-.ci label{color:var(--text3);font-size:.88em;white-space:nowrap}
+.ci label{color:var(--text3);font-size:.95em;white-space:nowrap}
 /* Point size slider */
 .sg{display:flex;align-items:center;gap:5px}
-.sg label{color:var(--text3);font-size:.88em;white-space:nowrap}
-.sg .sv2{color:var(--accent);font-weight:bold;font-size:.9em;min-width:48px}
+.sg label{color:var(--text3);font-size:.95em;white-space:nowrap}
+.sg .sv2{color:var(--accent);font-weight:bold;font-size:.95em;min-width:52px}
 input[type=range]{width:90px;accent-color:var(--accent);cursor:pointer}
 input[type=number]{background:var(--inp-bg);border:1px solid var(--inp-bd);
-                   color:var(--accent);padding:3px 7px;border-radius:4px;
-                   font-size:.92em;width:95px;
+                   color:var(--accent);padding:4px 8px;border-radius:4px;
+                   font-size:.98em;width:100px;
                    font-family:Consolas,monospace;font-weight:bold}
 input[type=number]:focus{outline:2px solid var(--accent)}
 /* Threshold enable checkbox */
 .thr-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;
-            font-size:.88em;color:var(--text2);user-select:none}
-.thr-toggle input[type=checkbox]{width:14px;height:14px;cursor:pointer;
+            font-size:.95em;color:var(--text2);user-select:none}
+.thr-toggle input[type=checkbox]{width:15px;height:15px;cursor:pointer;
                                   accent-color:var(--danger)}
 select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accent);
-       padding:4px 8px;border-radius:4px;font-size:.9em;
+       padding:5px 9px;border-radius:4px;font-size:.98em;
        font-family:Consolas,monospace;font-weight:bold;cursor:pointer}
 /* Boutons */
-.btn{padding:4px 11px;border:1px solid var(--border2);border-radius:4px;
-     cursor:pointer;font-size:.88em;font-weight:bold;white-space:nowrap;
+.btn{padding:5px 12px;border:1px solid var(--border2);border-radius:4px;
+     cursor:pointer;font-size:.95em;font-weight:bold;white-space:nowrap;
      background:var(--btn-bg);color:var(--btn-c);transition:opacity .15s}
 .btn:hover{opacity:.8}
 .btn-opt{background:transparent;border-color:var(--text3);color:var(--text3);
-         font-size:.84em;padding:4px 11px}
+         font-size:.92em;padding:5px 12px}
 .btn-opt:hover{color:var(--accent);border-color:var(--accent);opacity:1}
 .btnsnap{background:var(--btn2-bg);color:var(--btn2-c);border-color:var(--btn2-c)}
 /* Legend IN/OUT/10M/Threshold */
 .leg{display:flex;gap:10px;align-items:center;margin-left:auto}
-.legitem{display:flex;align-items:center;gap:5px;font-size:.86em;color:var(--text2)}
+.legitem{display:flex;align-items:center;gap:5px;font-size:.95em;color:var(--text2)}
 .legline{width:18px;height:3px;border-radius:2px}
 .legin{background:var(--ok)}.legout{background:var(--accent)}
 /* Y scale badge in the header */
-.yscale-badge{font-size:.84em;font-weight:bold;background:var(--accent2);
-              color:var(--accent);padding:2px 8px;border-radius:10px;
+.yscale-badge{font-size:.92em;font-weight:bold;background:var(--accent2);
+              color:var(--accent);padding:2px 9px;border-radius:10px;
               border:1px solid var(--border2);white-space:nowrap}
 /* Scrollbar custom */
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:var(--sb-bg)}
 ::-webkit-scrollbar-thumb{background:var(--sb-th);border-radius:3px}
+/* -- Stale-data banner (v1.28) ------------------------------ */
+#staleBar{
+  display:none; position:fixed; top:0; left:0; right:0; z-index:9999;
+  background:#c0392b; color:#fff; text-align:center;
+  font:bold 16px Consolas,monospace; padding:8px 10px;
+  letter-spacing:.5px; box-shadow:0 2px 8px rgba(0,0,0,.4);
+}
 </style>
 </head>
 <body>
+
+<!-- -- STALE-DATA BANNER (v1.28) ------------------------------
+     Shown when network_data.js has not been refreshed for >12s:
+     the PowerShell monitor stopped or died. Without this, the
+     dashboard would silently freeze (hidden console = no clue). -->
+<div id="staleBar">&#9888; MONITORING STOPPED - data is no longer being refreshed</div>
 
 <!-- -- HEADER ----------------------------------------------- -->
 <div class="hdr">
@@ -1472,7 +1552,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
         MRTG Bandwidth Monitor
       </span>
     </h1>
-    <span class="vtag">v1.27</span>
+    <span class="vtag">v1.29</span>
   </div>
   <div class="hr2">
     <!-- Current Y scale mode badge -->
@@ -1535,7 +1615,7 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
       <!-- Value field + apply button -->
       <div class="ci" id="thrInputGroup">
         <input type="number" id="thrInput" value="$initThr" min="1" max="200000">
-        <span style="color:var(--text3);font-size:.88em">Mbps</span>
+        <span style="color:var(--text3);font-size:.95em">Mbps</span>
         <button class="btn" onclick="applyThr()">OK</button>
       </div>
     </div>
@@ -1595,6 +1675,20 @@ select{background:var(--inp-bg);border:1px solid var(--inp-bd);color:var(--accen
 // ============================================================
 var DJP = '$dataFileJs';  // Path of the network_data.js file
 
+// -- CHART FONT SIZES (v1.29) - SINGLE SOURCE OF TRUTH --------
+// v1.29 FIX: the v1.27 axis-font bump was silently REVERTED 2s
+// after load, because updateChartsForIface() overwrote the sizes
+// set by makeChart() with the old hardcoded 9/12 values. All chart
+// font sizes now live HERE and are referenced everywhere (creation,
+// per-cycle update, threshold plugin), so they can never diverge.
+var FS = {
+  axC : 12,   // axis ticks X/Y, compact (2x2 grid)
+  axF : 15,   // axis ticks X/Y, full screen
+  tip : 14,   // tooltip title + body
+  lblC: 11,   // threshold/10M line labels, compact
+  lblF: 13    // threshold/10M line labels, full screen
+};
+
 // ============================================================
 // GLOBAL UI STATE
 // ============================================================
@@ -1606,6 +1700,10 @@ var darkMode    = true;    // Current theme
 var optsOpen    = false;   // Options panel open/closed
 var ifaceOrder  = [];      // Interface order (for consistency)
 var initialized = false;   // HTML panels already built
+
+// -- Session guard + freshness (v1.28, ported from PS-PING) --
+var sessMs   = 0;   // startMs of the PS session feeding this page
+var lastWall = 0;   // wallMs of the last data write seen (PS clock)
 
 // Automatic Y scale steps (Mbps) - fine 1-2-5 progression
 // v1.10: intermediate steps added (notably 200 and 500 Mbps)
@@ -1906,8 +2004,9 @@ Chart.register({
     var thr = chart.config._thr;
     if(!thr) return;
     // Font adapted to the mode (compact grid vs full screen)
+    // v1.29: sizes come from FS (single source of truth)
     var compact = chart.config._compact;
-    var lblFont = compact ? 'bold 9px Consolas' : 'bold 11px Consolas';
+    var lblFont = 'bold ' + (compact ? FS.lblC : FS.lblF) + 'px Consolas';
     var c2 = chart.ctx;
     var xs = chart.scales.x;
     var ys = chart.scales.y;
@@ -2000,7 +2099,7 @@ function makeChart(cid, compact){
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: { titleFont: { size: 13 }, bodyFont: { size: 13 }, callbacks: {
+        tooltip: { titleFont: { size: FS.tip }, bodyFont: { size: FS.tip }, callbacks: {
           title: function(items){
             if(!items || !items.length) return '';
             return ftTip(items[0].parsed.x);
@@ -2029,8 +2128,8 @@ function makeChart(cid, compact){
             color: gcs('--tick'),
             // Show all 7 ticks without skipping any
             autoSkip: false,
-            // v1.11: hours at the same size as the rates (Y axis)
-            font: { size: compact ? 11 : 14, family: 'Consolas' },
+            // v1.29: sizes from FS (12 compact / 15 full screen)
+            font: { size: compact ? FS.axC : FS.axF, family: 'Consolas' },
             maxRotation: 0,
             // Reformats the timestamp (ms) by the chart's view
             callback: function(value){
@@ -2045,8 +2144,8 @@ function makeChart(cid, compact){
           min: 0,
           ticks: {
             color: gcs('--tickY'),
-            // v1.9: larger font for readability
-            font: { size: compact ? 11 : 14, family: 'Consolas' },
+            // v1.29: sizes from FS (12 compact / 15 full screen)
+            font: { size: compact ? FS.axC : FS.axF, family: 'Consolas' },
             // Fewer ticks: leaves room for 2-line labels
             maxTicksLimit: compact ? 5 : 7,
             padding: 3,
@@ -2332,8 +2431,11 @@ function updateChartsForIface(name){
       // v1.16: the number of ticks is now imposed to 6
       //    segments (7 ticks) by afterBuildTicks in makeChart() -
       //    no more maxTicksLimit varying by view.
-      // v1.11: hours at the same size as the rates (Y axis)
-      ch.options.scales.x.ticks.font.size     = cp ? 9 : 12;
+      // v1.29 FIX: this per-cycle update used to overwrite the font
+      //    sizes with the OLD hardcoded 9/12 values, silently undoing
+      //    the v1.27 readability bump 2s after load. Now reads FS,
+      //    the same source as makeChart() -> sizes can never diverge.
+      ch.options.scales.x.ticks.font.size     = cp ? FS.axC : FS.axF;
       ch.options.scales.x.grid.color          = gcs('--grid');
 
       // v1.15: FIXED X domain = [now - window ; now]
@@ -2350,8 +2452,8 @@ function updateChartsForIface(name){
       ch.options.scales.x.max = tMax;
       ch.config._view = vk;   // used by the X formatting callback
       ch.options.scales.y.ticks.color         = gcs('--tickY');
-      // v1.9 : police Y agrandie + moins de graduations
-      ch.options.scales.y.ticks.font.size     = cp ? 9 : 12;
+      // v1.29 FIX: same as X above - FS instead of hardcoded 9/12
+      ch.options.scales.y.ticks.font.size     = cp ? FS.axC : FS.axF;
       ch.options.scales.y.ticks.maxTicksLimit = cp ? 5 : 7;
       ch.options.scales.y.grid.color          = gcs('--grid2');
 
@@ -2427,6 +2529,7 @@ function exportSnapshot(){
   var nowStr = new Date().toLocaleString('en-US');
 
   // Build the snapshot HTML
+  // v1.29: snapshot axis fonts 12 -> 13px, sub/stats text slightly larger
   var html =
     '<!DOCTYPE html><html lang="en" translate="no"><head><meta charset="UTF-8">' +
     '<title>PS-MRTG Snapshot ' + ts + '</title>' +
@@ -2436,11 +2539,11 @@ function exportSnapshot(){
     ) +
     '<style>' +
     'body{background:'+bg+';color:'+tx+';font-family:Segoe UI,monospace;padding:16px;margin:0}' +
-    'h2{margin-bottom:4px}.sub{color:#778899;font-size:.8em;margin-bottom:14px}' +
+    'h2{margin-bottom:4px}.sub{color:#778899;font-size:.9em;margin-bottom:14px}' +
     '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:12px}' +
     '.card{background:'+sf+';border:1px solid '+bd+';border-radius:8px;padding:12px}' +
-    '.ct{font-size:.9em;font-weight:bold;color:'+titleC+';margin-bottom:6px}' +
-    '.st{display:flex;gap:12px;font-size:.76em;margin-bottom:8px;flex-wrap:wrap}' +
+    '.ct{font-size:1em;font-weight:bold;color:'+titleC+';margin-bottom:6px}' +
+    '.st{display:flex;gap:12px;font-size:.86em;margin-bottom:8px;flex-wrap:wrap}' +
     '</style></head><body>' +
     '<h2>&#128247; PS-MRTG Snapshot</h2>' +
     '<div class="sub">' + nowStr + ' &mdash; ' + escH(MD.dur||'') + '</div>' +
@@ -2494,8 +2597,8 @@ function exportSnapshot(){
     ']},' +
     'options:{responsive:true,maintainAspectRatio:false,animation:false,' +
     'plugins:{legend:{display:false}},' +
-    'scales:{x:{ticks:{maxTicksLimit:6,font:{size:12}}},' +
-    'y:{min:0,max:ym,ticks:{font:{size:12},maxTicksLimit:6,padding:3,callback:function(v){return yt(v);}}}}}});' +
+    'scales:{x:{ticks:{maxTicksLimit:6,font:{size:13}}},' +
+    'y:{min:0,max:ym,ticks:{font:{size:13},maxTicksLimit:6,padding:3,callback:function(v){return yt(v);}}}}}});' +
     '});});' +
     '<\/script></body></html>';
 
@@ -2525,6 +2628,18 @@ function loadData(){
   s.onload = function(){
     if(!window.MD) return;
     MD = window.MD;
+
+    // -- SESSION GUARD (v1.28) --------------------------------
+    // startMs identifies the PS session (monotonic epoch). If it
+    // changes mid-page, a NEW instance took over while this window
+    // survived (rare: takeover normally closes it). Mixing two
+    // sessions' buffers corrupts the charts: reload from scratch.
+    if(MD.startMs){
+      if(sessMs === 0){ sessMs = MD.startMs; }
+      else if(MD.startMs !== sessMs){ location.reload(); return; }
+    }
+    // Freshness: remember when PS last wrote the data file
+    if(MD.wallMs) lastWall = MD.wallMs;
 
     // ONE-TIME INIT from PS - never overwritten afterwards
     // thrEnabled, thrVal, yScaleMode: controlled by the UI after init
@@ -2569,9 +2684,21 @@ function loadData(){
   document.head.appendChild(s);
 }
 
+// -- Stale watchdog (v1.28) ----------------------------------
+// PS writes every IntervalSec (5s default). If the last write is
+// older than 12s, the monitor stopped (or died): show the banner.
+// Same machine -> Date.now() and PS wallMs share the same clock.
+function checkStale(){
+  var b = document.getElementById('staleBar');
+  if(!b) return;
+  var stale = (lastWall > 0) && ((Date.now() - lastWall) > 12000);
+  b.style.display = stale ? 'block' : 'none';
+}
+
 // Startup: first load then 2s cycle
 loadData();
 setInterval(loadData, 2000);
+setInterval(checkStale, 2000);
 </script>
 </body>
 </html>
@@ -2592,7 +2719,7 @@ $script:startMs = Get-NowMs
 Write-Host ""
 Write-Host "  Mode : $($ExecutionContext.SessionState.LanguageMode)" -ForegroundColor Cyan
 Write-Host "  =============================================" -ForegroundColor Cyan
-Write-Host "   PS-MRTG v1.27 - MRTG Bandwidth Monitor"                  -ForegroundColor White
+Write-Host "   PS-MRTG v1.29 - MRTG Bandwidth Monitor"                  -ForegroundColor White
 Write-Host "   Network bandwidth - real time"          -ForegroundColor Yellow
 Write-Host "   Interval   : ${IntervalSec}s | MaxPts : $MaxPoints" -ForegroundColor Yellow
 Write-Host "   Y scale  : $YScaleMode"                    -ForegroundColor Yellow
@@ -2660,36 +2787,42 @@ Write-Host ""
 $lastWrite   = Get-Date
 $lastCollect = Get-Date
 $lastAlive   = Get-Date
+$lastLog     = Get-Date
 $startWatch  = Get-Date
-$AliveEvery  = 5     # seconds between two window checks
-$WatchGrace  = 12    # grace (s): give the browser time to spawn its process
-$wasAlive    = $false  # true once the dashboard window is confirmed open
+$AliveEvery  = 2     # seconds between two window checks (cheap PID check)
+$WatchGrace  = 10    # grace (s): give the browser time to spawn its process
+$LogEvery    = 30    # seconds between two console rate lines (v1.28)
+$wasAlive    = $false  # (fallback mode) window confirmed open at least once
 $missStreak  = 0     # consecutive checks with the window absent
-$MissNeeded  = 12    # need this many in a row (~60s) before stopping
+$MissNeeded  = 3     # PID mode: 3 misses x 2s = stop ~6s after close (v1.28)
+$MissNeededFallback = 15  # fallback (no CIM): 15 x 2s = ~30s confirmation
+$script:windowPid  = 0    # authoritative window PID (0 = not identified)
+$pidTries    = 0     # identification attempts
+$PidTriesMax = 15    # give up identifying after ~30s -> fallback mode
+$collectTick = 0     # incremented at each collection (write gating, v1.28)
+$writtenTick = -1    # last collectTick flushed to network_data.js
 $script:Superseded = $false  # set when a NEWER instance takes the lock
 
 try {
     while ($true) {
 
-        # --- Watch (auto-stop), v1.24: two decoupled mechanisms ---
+        # --- Watch (auto-stop), v1.28 ---
         #
-        # (A) RELAUNCH -> instant lock handover (no delay, no overlap).
-        #     Every check we re-read instance.lock. If it no longer contains
-        #     OUR PID, a newer instance has taken over: we step down
-        #     IMMEDIATELY, without flushing data or touching the browser
-        #     (both now belong to the new instance). This is what makes the
-        #     long close-confirmation below completely safe: a relaunch never
-        #     waits on it, so two instances can never overlap.
+        # (A) RELAUNCH -> instant lock handover (unchanged from v1.24).
+        #     If instance.lock no longer contains OUR PID, a newer instance
+        #     has taken over: step down immediately, hands-off.
         #
-        # (B) WINDOW CLOSED -> coupled signals + long confirmation.
-        #     Test-BrowserOpen returns "open" if ANY of its signals (window
-        #     TITLE, dedicated profile dir, process handle) says so; "closed"
-        #     requires ALL of them to agree. On top of that the window must
-        #     stay absent ~60s (12 consecutive checks) before we stop. A
-        #     false kill while the dashboard is open is thus practically
-        #     impossible -- and the 60s delay costs nothing, because nobody
-        #     is waiting (the user already closed the window, and relaunches
-        #     are handled instantly by (A)).
+        # (B) WINDOW CLOSED -> authoritative PID watch (v1.28).
+        #     During the first ~30s we identify the window's ROOT process
+        #     via Find-BrowserWindowPid (CIM, a handful of calls in total).
+        #     Once identified, each check is a cheap Get-Process -Id: no
+        #     more permanent CIM scans. The root PID's lifetime IS the
+        #     window's lifetime, so 3 misses (~6s) are enough to stop --
+        #     down from ~60s in v1.24. One RE-SCAN per miss protects
+        #     against the rare case where the browser restarts its own
+        #     root process: if a new root owns our profile, adopt it.
+        #     If CIM never answers (windowPid stays 0), fall back to the
+        #     v1.24 3-signal check with a longer ~30s confirmation.
         if (((Get-Date) - $lastAlive).TotalSeconds -ge $AliveEvery) {
             $lastAlive = Get-Date
 
@@ -2705,13 +2838,50 @@ try {
 
             # (B) window-closed check -- after grace period only
             if (((Get-Date) - $startWatch).TotalSeconds -ge $WatchGrace) {
-                if (Test-BrowserOpen -ProfileDir $profileDir) {
-                    $wasAlive = $true; $missStreak = 0
-                } elseif ($wasAlive) {
-                    $missStreak++
-                    if ($missStreak -ge $MissNeeded) {
-                        Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
-                        break
+
+                # Identification phase: find the window root PID (few tries)
+                if ($script:windowPid -eq 0 -and $pidTries -lt $PidTriesMax) {
+                    $pidTries++
+                    $script:windowPid = Find-BrowserWindowPid -ProfileDir $profileDir
+                    if ($script:windowPid -gt 0) {
+                        Write-Host "  Window process identified (PID $($script:windowPid)) - fast auto-stop armed." -ForegroundColor Green
+                    } elseif ($pidTries -eq $PidTriesMax) {
+                        Write-Host "  Window process not identified - fallback watch (slower stop)." -ForegroundColor Yellow
+                    }
+                }
+
+                if ($script:windowPid -gt 0) {
+                    # PID mode: cheap liveness check on the root process
+                    $alive = $false
+                    try {
+                        if (Get-Process -Id $script:windowPid -ErrorAction SilentlyContinue) { $alive = $true }
+                    } catch { }
+                    if ($alive) {
+                        $missStreak = 0
+                    } else {
+                        # Re-scan once per miss: adopt a restarted root if any
+                        $np = Find-BrowserWindowPid -ProfileDir $profileDir
+                        if ($np -gt 0) {
+                            $script:windowPid = $np
+                            $missStreak = 0
+                        } else {
+                            $missStreak++
+                            if ($missStreak -ge $MissNeeded) {
+                                Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
+                                break
+                            }
+                        }
+                    }
+                } else {
+                    # Fallback mode (CIM unavailable): v1.24 3-signal check
+                    if (Test-BrowserOpen -ProfileDir $profileDir) {
+                        $wasAlive = $true; $missStreak = 0
+                    } elseif ($wasAlive) {
+                        $missStreak++
+                        if ($missStreak -ge $MissNeededFallback) {
+                            Write-Host "  Window closed -> automatic stop." -ForegroundColor Yellow
+                            break
+                        }
                     }
                 }
             }
@@ -2719,32 +2889,38 @@ try {
 
         $now = Get-Date
 
-        # Read browser commands (threshold, yScale)
-        Read-CmdFile
-
         # Collect bandwidth (every $IntervalSec s)
         if (($now - $lastCollect).TotalSeconds -ge $IntervalSec) {
             Collect-Bandwidth
             $lastCollect = $now
+            $collectTick++
         }
 
-        # Write network_data.js (every $WriteEvery s)
-        if (($now - $lastWrite).TotalSeconds -ge $WriteEvery) {
+        # Write network_data.js - v1.28: only when NEW data exists.
+        # Collection runs every $IntervalSec; writing faster than that
+        # (the old separate $WriteEvery timer) only produced duplicate
+        # files and duplicate log lines.
+        if ($collectTick -ne $writtenTick -and
+            ($now - $lastWrite).TotalSeconds -ge $WriteEvery) {
             Write-DataJs
-            $lastWrite = $now
+            $lastWrite   = $now
+            $writtenTick = $collectTick
 
-            # Console log: duration + current rates per interface
-            $elapsed = Get-ElapsedSec
-            $hh = [int]($elapsed / 3600)
-            $mm = [int](($elapsed % 3600) / 60)
-            $ss = $elapsed % 60
-            $parts = @()
-            foreach ($ifName in $script:interfaces.Keys) {
-                $iface  = $script:interfaces[$ifName]
-                $parts += "$ifName  IN:$(Format-Mbps $iface.CurIn)  OUT:$(Format-Mbps $iface.CurOut)"
+            # Console log: duration + current rates (throttled, v1.28)
+            if (($now - $lastLog).TotalSeconds -ge $LogEvery) {
+                $lastLog = $now
+                $elapsed = Get-ElapsedSec
+                $hh = [int]($elapsed / 3600)
+                $mm = [int](($elapsed % 3600) / 60)
+                $ss = $elapsed % 60
+                $parts = @()
+                foreach ($ifName in $script:interfaces.Keys) {
+                    $iface  = $script:interfaces[$ifName]
+                    $parts += "$ifName  IN:$(Format-Mbps $iface.CurIn)  OUT:$(Format-Mbps $iface.CurOut)"
+                }
+                Write-Host ("  [{0:D2}h{1:D2}m{2:D2}s]  {3}" -f `
+                    $hh, $mm, $ss, ($parts -join "   |   ")) -ForegroundColor Cyan
             }
-            Write-Host ("  [{0:D2}h{1:D2}m{2:D2}s]  {3}" -f `
-                $hh, $mm, $ss, ($parts -join "   |   ")) -ForegroundColor Cyan
         }
 
         # Short pause to avoid saturating the CPU
@@ -2765,7 +2941,12 @@ finally {
         Write-Host "  Final report : $htmlFile" -ForegroundColor Gray
         # Release single-instance lock and close our own browser window if it
         # is still open (e.g. on Ctrl+C), so nothing is left orphaned.
+        # v1.28: use the known window PID first (no CIM needed); the CIM
+        # sweep remains as a backup for child processes / unknown PID.
         Remove-Item -Path $lockFile -Force -ErrorAction SilentlyContinue
+        if ($script:windowPid -gt 0) {
+            Stop-Process -Id $script:windowPid -Force -ErrorAction SilentlyContinue
+        }
         try {
             Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" -ErrorAction Stop |
                 Where-Object { $_.CommandLine -like "*$profileDir*" } |
