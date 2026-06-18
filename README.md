@@ -20,7 +20,7 @@ sur 4 échelles de temps (de la dernière heure aux 15 derniers jours).
 ## 📸 Aperçu
 
 <p align="center">
-  <img src="demo4.gif" alt="Vue Live plein écran" width="90%">
+  <img src="PS_MRTG_2026-06-02.png" alt="PS-MRTG Vue Live plein écran" width="90%">
 </p>
 
 ---
